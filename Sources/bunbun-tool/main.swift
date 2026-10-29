@@ -115,6 +115,44 @@ case "score":
     }
     print(String(format: "合計 %.2f（未含讀音權重）", total))
 
+case "keys":
+    // 模擬按鍵，例如：keys --lm x.lm "5j/ jp6<down>2<enter>"
+    // 特殊鍵：<space> <enter> <esc> <bs> <del> <left> <right> <up> <down> <home> <end>，大寫字母代表 Shift+字母
+    let lm = loadModel()
+    let session = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: nil))
+    let specials: [String: KeyEvent] = [
+        "space": .space, "enter": .enter, "esc": .escape, "bs": .backspace, "del": .forwardDelete,
+        "left": .left, "right": .right, "up": .up, "down": .down, "home": .home, "end": .end,
+    ]
+    var committed = ""
+    func show(_ label: String) {
+        var line = "\(label)\t組字：「\(session.markedText)」"
+        if let list = session.candidateList {
+            line += "\t候選：" + list.items.prefix(9).enumerated().map { i, c in
+                (i == list.highlighted ? "▸" : "") + "\(i + 1).\(c.text)"
+            }.joined(separator: " ")
+        }
+        print(line)
+    }
+    var chars = Array(args.joined(separator: " "))
+    while !chars.isEmpty {
+        let key: KeyEvent
+        var label = String(chars[0])
+        if chars[0] == "<", let close = chars.firstIndex(of: ">"), let k = specials[String(chars[1..<close])] {
+            key = k
+            label = String(chars[0...close])
+            chars.removeFirst(close + 1)
+        } else {
+            let c = chars.removeFirst()
+            key = c == " " ? .space : (c.isUppercase ? .character(Character(c.lowercased()), shift: true) : .character(c, shift: false))
+        }
+        let out = session.handle(key)
+        committed += out.commit
+        if label.hasPrefix("<") || out.beep { show(label + (out.beep ? "（嗶）" : "")) }
+    }
+    show("結束")
+    print("已送出：「\(committed)」")
+
 case "reading":
     let lm = loadModel()
     let evaluator = Evaluator(lm: lm)

@@ -205,8 +205,8 @@ public struct Decoder {
         }
     }
 
-    /// 候選清單。游標在字前面時列出「從游標開始」的詞；游標在最後時列出「結束在最後」的詞。
-    /// 長詞在前，同長度依上下文分數排序。
+    /// 候選清單。游標在字前面時列出「從游標開始」的詞（長詞在前）；游標在最後時只列出最後一個字。
+    /// 同長度依上下文分數排序。
     public func candidates(_ tokens: [Token], cursor: Int, walk: [WalkNode]) -> [Candidate] {
         let n = tokens.count
         guard n > 0 else { return [] }
@@ -218,9 +218,7 @@ public struct Decoder {
             for l in stride(from: len, through: 1, by: -1) { spans.append((cursor, l)) }
         } else {
             guard tokens[n - 1].syllable != nil else { return [] }
-            var len = 0
-            while len < lm.maxPhraseLength, n - 1 - len >= 0, tokens[n - 1 - len].syllable != nil { len += 1 }
-            for l in stride(from: len, through: 1, by: -1) { spans.append((n - l, l)) }
+            spans.append((n - 1, 1))
         }
         var result: [Candidate] = []
         for span in spans {

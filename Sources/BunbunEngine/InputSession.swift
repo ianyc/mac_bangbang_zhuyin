@@ -101,12 +101,8 @@ public final class InputSession {
             return insertLiteral(String(c))
         case .space:
             if !composer.isEmpty { return completeSyllable(tone: 1) }
-            // 組字中按空白：送出已組好的字，再加一個半形空白。
-            if !composition.isEmpty {
-                let text = composition.text + " "
-                reset()
-                return SessionOutput(handled: true, commit: text)
-            }
+            // 組字中按空白：在組字區放一個半形空白，按 Enter 才送出。
+            if !composition.isEmpty { return insertLiteral(" ") }
             return .passThrough
         case .enter:
             guard isComposing else { return .passThrough }
@@ -203,11 +199,16 @@ public final class InputSession {
         let items = composition.candidates()
         guard !items.isEmpty else { return false }
         var list = CandidateList(items: items, perPage: candidatesPerPage)
-        // 若目前選字結果就在清單中，預設反白它。
-        if let current = composition.walk.first(where: { node in
-            items.contains { $0.start == node.start && $0.length == node.length && $0.word == node.word }
-        }), let idx = items.firstIndex(where: { $0.start == current.start && $0.length == current.length && $0.word == current.word }) {
-            list.highlighted = idx
+        // 預設反白目前顯示的詞；它是更長詞的一部分時，反白目前顯示的那個字。
+        let position = items[0].start
+        let shown = Array(composition.text)
+        if let node = composition.walk.first(where: { $0.start <= position && position < $0.end }) {
+            if let idx = items.firstIndex(where: { $0.start == node.start && $0.length == node.length && $0.word == node.word }) {
+                list.highlighted = idx
+            } else if position < shown.count,
+                      let idx = items.firstIndex(where: { $0.length == 1 && $0.text == String(shown[position]) }) {
+                list.highlighted = idx
+            }
         }
         candidateList = list
         return true

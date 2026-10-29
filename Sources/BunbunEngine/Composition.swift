@@ -72,10 +72,33 @@ public final class Composition {
     }
 
     /// 手動選字：把這個詞釘在該位置，再重新計算整句。
+    /// 選字位置前面的字全部固定不變；後面的字可依新的上下文重新選。
     public func select(_ candidate: Candidate) {
+        freezeText(before: candidate.start)
         pins.removeAll { $0.start < candidate.start + candidate.length && candidate.start < $0.end }
         pins.append(Pin(start: candidate.start, length: candidate.length, word: candidate.word))
         rewalk()
+    }
+
+    /// 把 position 之前目前顯示的字都釘住。跨過 position 的詞拆成單字釘住前半段。
+    private func freezeText(before position: Int) {
+        let lm = decoder.lm
+        for node in walk where node.start < position {
+            guard let word = node.word else { continue }  // 標點、英文本來就不會變
+            if node.end <= position {
+                let pin = Pin(start: node.start, length: node.length, word: word)
+                if !pins.contains(pin) { pins.append(pin) }
+                continue
+            }
+            let chars = Array(node.text)
+            for i in node.start..<position {
+                guard let s = tokens[i].syllable, i - node.start < chars.count else { continue }
+                let char = String(chars[i - node.start])
+                if let e = lm.entries(for: ReadingKey([s.code])).first(where: { lm.words[Int($0.word)] == char }) {
+                    pins.append(Pin(start: i, length: 1, word: e.word))
+                }
+            }
+        }
     }
 
     /// 選字結果裡，結束在 position 的那個詞（作為下一個詞的上下文）。

@@ -3,16 +3,18 @@ import XCTest
 
 /// 測試用的迷你語言模型。
 private func makeLM(bigrams: [(String, String, Float)] = [], skips: [(String, String, Float)] = []) -> LanguageModel {
-    let words = ["<s>", "你", "妳", "好", "你好", "越", "月", "更新", "難", "南", "用", "越南", "更", "新"]
+    let words = ["<s>", "你", "妳", "好", "你好", "越", "月", "更新", "難", "南", "用", "越南", "更", "新", "中", "鐘", "文", "聞", "中文"]
     let unigram: [String: Float] = [
         "<s>": -30, "你": -3, "妳": -6, "好": -3, "你好": -4, "越": -6, "月": -4,
         "更新": -6, "難": -5, "南": -5.5, "用": -4, "越南": -6, "更": -6, "新": -6,
+        "中": -5, "鐘": -6, "文": -5, "聞": -7, "中文": -4,
     ]
     let id = Dictionary(uniqueKeysWithValues: words.enumerated().map { ($1, UInt32($0)) })
     let lexicon: [String: [String]] = [
         "ㄋㄧˇ": ["你", "妳"], "ㄏㄠˇ": ["好"], "ㄋㄧˇ ㄏㄠˇ": ["你好"],
         "ㄩㄝˋ": ["越", "月"], "ㄍㄥ ㄒㄧㄣ": ["更新"], "ㄋㄢˊ": ["難", "南"],
         "ㄩㄥˋ": ["用"], "ㄩㄝˋ ㄋㄢˊ": ["越南"], "ㄍㄥ": ["更"], "ㄒㄧㄣ": ["新"],
+        "ㄓㄨㄥ": ["中", "鐘"], "ㄨㄣˊ": ["文", "聞"], "ㄓㄨㄥ ㄨㄣˊ": ["中文"],
     ]
     var lex: [ReadingKey: [LexiconEntry]] = [:]
     for (reading, ws) in lexicon {
@@ -81,13 +83,17 @@ final class InputSessionTests: XCTestCase {
         XCTAssertEqual(session.markedText, "更新")
     }
 
-    /// 需求 7c：組字中、沒有待拼注音時按空白 → 送出並輸出半形空白。
-    func testSpaceAfterCompositionCommitsWithSpace() {
+    /// 需求 7c：組字中、沒有待拼注音時按空白 → 在組字區加半形空白，按 Enter 才送出。
+    func testSpaceAfterCompositionStaysInComposition() {
         let session = InputSession(lm: makeLM())
         type(session, "su3cl3")
         let out = session.handle(.space)
-        XCTAssertEqual(out.commit, "你好 ")
+        XCTAssertEqual(out.commit, "")
         XCTAssertTrue(out.handled)
+        XCTAssertEqual(session.markedText, "你好 ")
+        type(session, "su3")
+        XCTAssertEqual(session.markedText, "你好 你")
+        XCTAssertEqual(session.handle(.enter).commit, "你好 你")
         XCTAssertFalse(session.isComposing)
     }
 
@@ -129,14 +135,32 @@ final class InputSessionTests: XCTestCase {
         XCTAssertEqual(session.composition.cursor, 1, "選完游標移到該詞後面")
     }
 
-    func testCandidatesAtEndListWordsEndingAtEnd() {
+    /// 游標在最後時只列出最後一個字。
+    func testCandidatesAtEndListOnlyLastCharacter() {
         let session = InputSession(lm: makeLM())
         type(session, "su3cl3")
         session.handle(.down)
-        XCTAssertEqual(session.candidateList!.items.map(\.text), ["你好", "好"])
+        XCTAssertEqual(session.candidateList!.items.map(\.text), ["好"])
         session.handle(.escape)
         XCTAssertNil(session.candidateList)
         XCTAssertEqual(session.markedText, "你好")
+    }
+
+    /// 改了「文」之後，前面的「中」不能跟著變（沒有固定的話會變成「鐘聞」）。
+    func testSelectionKeepsPrecedingText() {
+        let lm = makeLM(bigrams: [("鐘", "聞", -1)])
+        let session = InputSession(lm: lm)
+        type(session, "5j/ jp6")
+        XCTAssertEqual(session.markedText, "中文")
+        session.handle(.down)
+        let items = session.candidateList!.items
+        XCTAssertEqual(items.map(\.text), ["文", "聞"])
+        XCTAssertEqual(items[session.candidateList!.highlighted].text, "文", "預設反白目前的字")
+        session.handle(.character("2", shift: false))
+        XCTAssertEqual(session.markedText, "中聞")
+        // 沒有固定前面的字時，同樣的選擇會讓整句變成「鐘聞」
+        let free = Decoder(lm: lm).decode(session.composition.tokens, pins: [Pin(start: 1, length: 1, word: 17)])
+        XCTAssertEqual(free.map(\.text).joined(), "鐘聞")
     }
 
     func testCursorMovementAndInsertion() {

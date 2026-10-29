@@ -18,10 +18,10 @@ scripts/install.sh
 | 按鍵 | 行為 |
 |---|---|
 | 注音鍵（標準大千） | 拼注音；3 4 6 7 為聲調，空白鍵為一聲 |
-| 空白鍵（沒有待拼注音時） | 送出組好的字，再輸出一個半形空白 |
+| 空白鍵（沒有待拼注音時） | 在組字區加一個半形空白（按 Enter 才一起送出） |
 | Enter | 送出組好的字 |
 | ← → / Home / End | 移動游標，可回頭改字 |
-| ↓ | 叫出候選字：游標在字**前面**時列出從這個字開始的詞；游標在最後時列出最後的詞 |
+| ↓ | 叫出候選字：游標在字**前面**時列出從這個字開始的詞（長詞在前）；游標在最後時只列出最後一個字 |
 | 候選窗中 1–9 / ↑↓ + Enter | 選字（選完游標會移到該詞後面） |
 | 候選窗中 空白 / ← → | 換頁 |
 | Esc | 清掉正在拼的注音；沒有注音時清掉整串 |
@@ -29,6 +29,8 @@ scripts/install.sh
 | Shift + , . / ; ' 1 | ，。？：；！ |
 | ' [ ] / Shift + [ ] | 、「」『』 |
 | Caps Lock | 系統的中英切換（ABC） |
+
+手動選字後，選字位置**前面**的字就固定不變；後面的字會依新的上下文重新選。
 
 選過的字詞會記在 `~/Library/Application Support/BunbunZhuyin/user-model.json`，下次在同樣的前後文會優先選它。
 
@@ -65,6 +67,7 @@ swift test               # 單元測試（按鍵行為、選字、模型檔）
 .build/release/bunbun-tool lookup  --lm build/bunbun.lm ㄉㄜ˙                              # 查某讀音的候選字與分數
 .build/release/bunbun-tool score   --lm build/bunbun.lm 越 更新 越 難 用                   # 某種斷詞的分數明細
 .build/release/bunbun-tool eval    --lm build/bunbun.lm Tests/eval/sentences.txt           # 跑測試句
+.build/release/bunbun-tool keys    --lm build/bunbun.lm "5j/ jp6<down>2<enter>"           # 模擬按鍵（大千鍵位）
 ```
 
 遇到選錯的句子，把它加進 `Tests/eval/sentences.txt`（需要時用「句子 | 注音」指定讀音），改完詞庫或參數後重跑 `scripts/build-model.sh` 確認沒有變差。
