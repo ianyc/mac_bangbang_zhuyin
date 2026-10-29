@@ -111,12 +111,41 @@ final class InputSessionTests: XCTestCase {
         XCTAssertEqual(session.markedText, "你B")
     }
 
-    func testPunctuation() {
+    /// 全形標點不論何時都進入組字區，按 Enter 才送出（同微軟新注音）。
+    func testFullWidthPunctuationEntersComposition() {
         let session = InputSession(lm: makeLM())
-        XCTAssertEqual(session.handle(.character(",", shift: true)).commit, "，")
-        XCTAssertEqual(session.handle(.character(".", shift: true)).commit, "。")
-        XCTAssertEqual(session.handle(.character("'", shift: false)).commit, "、")
-        XCTAssertEqual(session.handle(.character("[", shift: false)).commit, "「")
+        let out = session.handle(.character(",", shift: true))
+        XCTAssertTrue(out.handled)
+        XCTAssertEqual(out.commit, "")
+        XCTAssertEqual(session.markedText, "，")
+        session.handle(.character(".", shift: true))
+        session.handle(.character("'", shift: false))
+        session.handle(.character("[", shift: false))
+        XCTAssertEqual(session.handle(.enter).commit, "，。、「")
+        XCTAssertFalse(session.isComposing)
+    }
+
+    func testHalfWidthSymbolCommitsDirectly() {
+        let session = InputSession(lm: makeLM())
+        XCTAssertEqual(session.handle(.character("2", shift: true)).commit, "@")
+        XCTAssertFalse(session.isComposing)
+    }
+
+    /// 目前顯示的詞排在候選字第一筆（同微軟新注音），即使有更長的詞。
+    func testCurrentSelectionIsFirstCandidate() {
+        let session = InputSession(lm: makeLM())
+        type(session, "m,4s06")
+        XCTAssertEqual(session.markedText, "越南")
+        session.handle(.down)
+        XCTAssertEqual(session.candidateList!.items.map(\.text), ["南", "難"], "目前的「南」排第一")
+        session.handle(.character("2", shift: false))  // 最後一字改選「難」
+        XCTAssertEqual(session.markedText, "越難")
+        session.handle(.home)
+        session.handle(.down)
+        let list = session.candidateList!
+        XCTAssertEqual(list.items.first?.text, "越")
+        XCTAssertEqual(list.highlighted, 0)
+        XCTAssertTrue(list.items.contains { $0.text == "越南" })
     }
 
     /// 需求 7b：游標在字「前面」按 ↓，列出從游標開始的詞。

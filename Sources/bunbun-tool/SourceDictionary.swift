@@ -14,10 +14,10 @@ struct SourceDictionary {
     var heterophony: [String: [Set<Syllable>]] = [:]
     /// 自訂讀音比例：字 → [讀音: 比例]
     var curatedWeights: [String: [Syllable: Double]] = [:]
-    /// 不在 Big5 字集內的字（簡體字、罕用異體字），自動選字時大幅降低優先順序。
+    /// 不在 Big5 字集內的字（簡體字、罕用異體字）與 discouraged-chars.txt 列出的字，自動選字時大幅降低優先順序。
     var nonBig5Chars: Set<String> = []
 
-    init(directory: URL, curated: URL?) throws {
+    init(directory: URL, curated: URL?, discouraged: URL? = nil) throws {
         func lines(_ name: String) throws -> [Substring] {
             let text = try String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8)
             return text.split(whereSeparator: \.isNewline).filter { !$0.hasPrefix("#") }
@@ -104,6 +104,14 @@ struct SourceDictionary {
                 let total = weights.values.reduce(0, +)
                 guard total > 0 else { continue }
                 curatedWeights[String(parts[0])] = weights.mapValues { $0 / total }
+            }
+        }
+
+        if let discouraged {
+            let text = try String(contentsOf: discouraged, encoding: .utf8)
+            for line in text.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
+                let char = line.trimmingCharacters(in: .whitespaces)
+                if !char.isEmpty { nonBig5Chars.insert(char) }
             }
         }
 

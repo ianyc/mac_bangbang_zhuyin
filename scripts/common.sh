@@ -11,4 +11,4 @@ APP_NAME=BunbunZhuyin
 APP="$ROOT/build/$APP_NAME.app"
 INSTALL_DIR="$HOME/Library/Input Methods"
 MODEL="$ROOT/build/bunbun.lm"
-CORPUS_FILES=(corpus/ptt/ppt_pretrain.json corpus/wiki/wiki_0.json corpus/wiki/wiki_1.json corpus/wiki/wiki_2.json corpus/wiki/wiki_3.json)
+CORPUS_FILES=(corpus/ptt/ppt_pretrain.json corpus/wiki/wiki_0.json corpus/wiki/wiki_1.json corpus/wiki/wiki_2.json corpus/wiki/wiki_3.json corpus/news/ey-train.json)

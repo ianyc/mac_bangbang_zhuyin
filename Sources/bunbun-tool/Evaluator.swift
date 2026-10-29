@@ -91,10 +91,10 @@ final class Evaluator {
         var sentenceAccuracy: Double { sentences == 0 ? 0 : Double(exact) / Double(sentences) }
     }
 
-    /// 他／她／它要看使用者想指誰，選哪個都不算錯。
+    /// 他／她／它要看使用者想指誰；台／臺兩種寫法都正確。選哪個都不算錯。
     static func equivalent(_ a: Character, _ b: Character) -> Bool {
-        let pronouns: Set<Character> = ["他", "她", "它", "牠"]
-        return a == b || (pronouns.contains(a) && pronouns.contains(b))
+        let groups: [Set<Character>] = [["他", "她", "它", "牠"], ["台", "臺"]]
+        return a == b || groups.contains { $0.contains(a) && $0.contains(b) }
     }
 
     /// 每行一句；可用「句子 | 注音」指定讀音（音節以空白分隔）。# 開頭為註解。

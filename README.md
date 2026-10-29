@@ -21,12 +21,12 @@ scripts/install.sh
 | 空白鍵（沒有待拼注音時） | 在組字區加一個半形空白（按 Enter 才一起送出） |
 | Enter | 送出組好的字 |
 | ← → / Home / End | 移動游標，可回頭改字 |
-| ↓ | 叫出候選字：游標在字**前面**時列出從這個字開始的詞（長詞在前）；游標在最後時只列出最後一個字 |
+| ↓ | 叫出候選字：游標在字**前面**時列出從這個字開始的詞（長詞在前）；游標在最後時只列出最後一個字。目前顯示的字詞一律排第一筆 |
 | 候選窗中 1–9 / ↑↓ + Enter | 選字（選完游標會移到該詞後面） |
 | 候選窗中 空白 / ← → | 換頁 |
 | Esc | 清掉正在拼的注音；沒有注音時清掉整串 |
 | Shift + 字母 | 半形大寫英文 |
-| Shift + , . / ; ' 1 | ，。？：；！ |
+| Shift + , . / ; ' 1 | ，。？：；！（全形標點一律進入組字區，按 Enter 才送出） |
 | ' [ ] / Shift + [ ] | 、「」『』 |
 | Caps Lock | 系統的中英切換（ABC） |
 
@@ -39,8 +39,8 @@ scripts/install.sh
 1. **詞庫**：小麥注音的詞與讀音（`data/mcbopomofo/`，MIT 授權，快照版本見 `SOURCE.txt`）。
    - 補上一般人實際打的讀音：不要（ㄅㄨˋ）、一下（ㄧ）、我覺得（ㄉㄜ˙）。
    - 常用破音字的讀音比例自己調整：`data/reading-weights.txt`。
-   - 簡體字、罕用異體字（非 Big5）仍可從候選字選，但不會被自動選中。
-2. **語言模型**：用 PTT 與中文維基（約 2.2 億詞）統計
+   - 簡體字、罕用異體字（非 Big5，以及 `data/discouraged-chars.txt` 列出的字，如「着」）仍可從候選字選，但不會被自動選中。
+2. **語言模型**：用 PTT、中文維基與行政院即時新聞（約 2.2 億詞）統計
    - 雙連詞：前一個詞是什麼（解決「月更新越**南**用」→「越難用」）。
    - 隔一個詞的搭配：例如「越 ＿ 越」（解決「**月**更新越難用」→「越更新越難用」）。
 3. **整句選字**：每次按鍵都對整串注音重新找出分數最高的斷詞組合。
@@ -51,11 +51,14 @@ scripts/install.sh
 |---|---|---|
 | 日常用語 156 句（`Tests/eval/sentences.txt`）整句全對 | 80.1% | 99.4% |
 | 語料保留未訓練的 8000 句，整句全對／逐字 | 62.3%／93.4% | 82.8%／97.3% |
+| 行政院新聞（未訓練的那一半）8000 句，整句全對 | — | 82.0% |
+
+評測時「他／她／它」「台／臺」視為相同。
 
 ## 開發
 
 ```bash
-scripts/build-model.sh   # 重建語言模型並跑正確率評測（第一次會下載約 1.5 GB 語料到 corpus/）
+scripts/build-model.sh   # 重建語言模型並跑三組正確率評測（第一次會下載約 1.5 GB 語料到 corpus/）
 scripts/build.sh         # 只建置 App
 swift test               # 單元測試（按鍵行為、選字、模型檔）
 ```
@@ -92,4 +95,4 @@ build/                  模型與 App（不納入 git）
 ## 授權與資料來源
 
 - 詞庫：[小麥注音 McBopomofo](https://github.com/openvanilla/McBopomofo)（MIT）
-- 語料（只用來統計詞頻，不打包進輸入法）：[PTT-pretrain-zhtw](https://huggingface.co/datasets/yuhuanstudio/PTT-pretrain-zhtw)（Apache-2.0）、[wikipedia-zh-tw](https://huggingface.co/datasets/yuhuanstudio/wikipedia-zh-tw)（CC BY-SA 4.0）
+- 語料（只用來統計詞頻，不打包進輸入法）：[PTT-pretrain-zhtw](https://huggingface.co/datasets/yuhuanstudio/PTT-pretrain-zhtw)（Apache-2.0）、[wikipedia-zh-tw](https://huggingface.co/datasets/yuhuanstudio/wikipedia-zh-tw)（CC BY-SA 4.0）、[行政院即時新聞](https://www.ey.gov.tw/opendata/BF42D887A7B414E2/154)（政府資料開放授權條款）

@@ -9,8 +9,11 @@ done
 swift build -c release --product bunbun-tool
 mkdir -p build
 .build/release/bunbun-tool build-lm --data data/mcbopomofo --weights data/reading-weights.txt \
+    --discouraged data/discouraged-chars.txt \
     --out "$MODEL" --heldout build/heldout.txt $CORPUS_FILES
 echo "== 日常用語測試"
 .build/release/bunbun-tool eval --lm "$MODEL" Tests/eval/sentences.txt --show 10
 echo "== 語料保留句測試"
 .build/release/bunbun-tool eval --lm "$MODEL" build/heldout.txt --limit 8000 --show 0
+echo "== 新聞測試"
+.build/release/bunbun-tool eval --lm "$MODEL" build/news-test.txt --limit 8000 --show 0 2>/dev/null

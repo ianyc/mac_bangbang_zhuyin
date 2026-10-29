@@ -4,7 +4,7 @@ import Foundation
 
 let usage = """
 用法：
-  bunbun-tool build-lm --data <小麥資料夾> --weights <讀音比例檔> --out <模型檔> [--heldout <檔案>] [--min-bigram N] [語料檔...]
+  bunbun-tool build-lm --data <小麥資料夾> --weights <讀音比例檔> [--discouraged <少用字檔>] --out <模型檔> [--heldout <檔案>] [--min-bigram N] [語料檔...]
   bunbun-tool convert --lm <模型檔> <注音，音節以空白分隔>
   bunbun-tool reading --lm <模型檔> <中文>
   bunbun-tool eval --lm <模型檔> <測試句檔> [--limit N] [--show N]
@@ -45,6 +45,7 @@ case "build-lm":
         exit(1)
     }
     let weights = option("--weights")
+    let discouraged = option("--discouraged")
     let heldoutPath = option("--heldout")
     var builder = ModelBuilder()
     if let m = option("--min-bigram"), let v = UInt32(m) { builder.minBigramCount = v }
@@ -52,7 +53,8 @@ case "build-lm":
     if let m = option("--min-skip"), let v = UInt32(m) { builder.minSkipCount = v }
     if let m = option("--corpus-weight"), let v = Double(m) { builder.corpusWeight = v }
     let start = Date()
-    let dict = try SourceDictionary(directory: URL(fileURLWithPath: data), curated: weights.map { URL(fileURLWithPath: $0) })
+    let dict = try SourceDictionary(directory: URL(fileURLWithPath: data), curated: weights.map { URL(fileURLWithPath: $0) },
+                                    discouraged: discouraged.map { URL(fileURLWithPath: $0) })
     info("詞庫：\(dict.words.count - 1) 個詞")
     var counter: CorpusCounter?
     if !args.isEmpty {

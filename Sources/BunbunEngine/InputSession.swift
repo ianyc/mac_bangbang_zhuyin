@@ -185,10 +185,11 @@ public final class InputSession {
         return SessionOutput(handled: true, commit: composition.commitLeading(keeping: maxCompositionLength))
     }
 
-    /// 英文字母、標點：沒有組字時直接送出；組字中則放進組字區。
+    /// 英文字母、標點：組字中一律放進組字區。沒有組字時，全形標點也進入組字區（按 Enter 才送出，
+    /// 同微軟新注音）；半形英數符號則直接送出。
     private func insertLiteral(_ text: String) -> SessionOutput {
         composer.clear()
-        if composition.isEmpty { return SessionOutput(handled: true, commit: text) }
+        if composition.isEmpty, text.allSatisfy(\.isASCII) { return SessionOutput(handled: true, commit: text) }
         composition.insert(.literal(text))
         return SessionOutput(handled: true, commit: composition.commitLeading(keeping: maxCompositionLength))
     }
@@ -196,21 +197,17 @@ public final class InputSession {
     // MARK: - 候選字
 
     private func openCandidates() -> Bool {
-        let items = composition.candidates()
+        var items = composition.candidates()
         guard !items.isEmpty else { return false }
-        var list = CandidateList(items: items, perPage: candidatesPerPage)
-        // 預設反白目前顯示的詞；它是更長詞的一部分時，反白目前顯示的那個字。
+        // 目前顯示的詞排第一筆（同微軟新注音）；它是更長詞的一部分時，把目前顯示的那個字排第一。
         let position = items[0].start
         let shown = Array(composition.text)
         if let node = composition.walk.first(where: { $0.start <= position && position < $0.end }) {
-            if let idx = items.firstIndex(where: { $0.start == node.start && $0.length == node.length && $0.word == node.word }) {
-                list.highlighted = idx
-            } else if position < shown.count,
-                      let idx = items.firstIndex(where: { $0.length == 1 && $0.text == String(shown[position]) }) {
-                list.highlighted = idx
-            }
+            let current = items.firstIndex { $0.start == node.start && $0.length == node.length && $0.word == node.word }
+                ?? (position < shown.count ? items.firstIndex { $0.length == 1 && $0.text == String(shown[position]) } : nil)
+            if let current { items.insert(items.remove(at: current), at: 0) }
         }
-        candidateList = list
+        candidateList = CandidateList(items: items, perPage: candidatesPerPage)
         return true
     }
 
