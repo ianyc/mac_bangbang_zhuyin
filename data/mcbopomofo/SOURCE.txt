@@ -1,0 +1,4 @@
+來源：https://github.com/openvanilla/McBopomofo
+commit：18e2060dd5d0b511753ad79a8fe0d112e944f1af
+取用日期：2026-10-29
+授權：MIT（見 LICENSE.txt）
