@@ -13,6 +13,18 @@ scripts/install.sh
 
 > 開發中的輸入法有可能出問題，請一直保留「ABC」輸入方式，隨時可以用 Caps Lock 切回去。
 
+### 安裝到其他 Mac（DMG）
+
+```bash
+scripts/make-dmg.sh   # 產生 build/BunbunZhuyin-<版本>.dmg（Apple 晶片與 Intel 通用，macOS 13 以上）
+```
+
+在另一台 Mac 打開 DMG，把「棒棒注音」拖到旁邊的「Input Methods」資料夾，再照 DMG 裡的「安裝說明」登出、登入並加入輸入方式。
+
+- DMG 會裝到 `/Library/Input Methods`（整台 Mac 共用）。開發用的這台已經用 `scripts/install.sh` 裝在 `~/Library/Input Methods`，不要再用 DMG 裝一份，否則會出現兩個棒棒注音。
+- 目前是本機簽章、沒有經過 Apple 公證。用 AirDrop 或網路下載傳過去的檔案會被 Gatekeeper 擋下，要執行安裝說明裡的 `xattr` 指令解除；用隨身碟複製通常不會被標記。
+- 選字記憶每台 Mac 各自獨立。
+
 ## 按鍵
 
 | 按鍵 | 行為 |

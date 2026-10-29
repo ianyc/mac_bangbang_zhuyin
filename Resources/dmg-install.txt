@@ -1,0 +1,23 @@
+棒棒注音 安裝說明
+==================
+
+【安裝】
+1. 把「棒棒注音」拖到旁邊的「Input Methods」資料夾（會要求輸入這台 Mac 的密碼）。
+2. 登出再登入一次。
+3. 到「系統設定 → 鍵盤 → 輸入方式 → 編輯… → ＋」，在「繁體中文」裡加入「棒棒注音」。
+4. 請保留「ABC」輸入方式，用 Caps Lock 切換中英文。
+
+【加入後沒有反應？】
+用 AirDrop、網路下載或訊息傳來的檔案，macOS 會標記為「來自網路」，
+沒有經過 Apple 公證的程式會被擋下來。請打開「終端機」執行下面這行，再登出、登入一次：
+
+  xattr -dr com.apple.quarantine "/Library/Input Methods/BunbunZhuyin.app"
+
+【更新】
+再拖曳一次、選「取代」，然後登出、登入。
+
+【移除】
+先在系統設定的輸入方式裡移除「棒棒注音」，
+再把「/Library/Input Methods/BunbunZhuyin.app」丟到垃圾桶，然後登出、登入。
+
+選字記憶存在「~/Library/Application Support/BunbunZhuyin/」，每台 Mac 各自獨立。
