@@ -1,4 +1,4 @@
-import BunbunEngine
+import BangbangEngine
 import Foundation
 
 /// 讀取語料（每篇文章是 JSON 裡的一個 "text" 字串），斷詞後統計單詞與雙連詞次數。

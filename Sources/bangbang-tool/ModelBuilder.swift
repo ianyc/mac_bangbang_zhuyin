@@ -1,4 +1,4 @@
-import BunbunEngine
+import BangbangEngine
 import Foundation
 
 /// 把詞庫與語料統計結果組成語言模型。

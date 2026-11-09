@@ -1,4 +1,4 @@
-import BunbunEngine
+import BangbangEngine
 import Foundation
 
 /// 從小麥注音的原始資料讀出：所有詞、每個詞的讀音、詞頻、破音字讀音順位。

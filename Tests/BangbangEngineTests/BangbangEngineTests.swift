@@ -1,4 +1,4 @@
-@testable import BunbunEngine
+@testable import BangbangEngine
 import XCTest
 
 /// 測試用的迷你語言模型。
@@ -123,6 +123,44 @@ final class InputSessionTests: XCTestCase {
         session.handle(.character("[", shift: false))
         XCTAssertEqual(session.handle(.enter).commit, "，。、「")
         XCTAssertFalse(session.isComposing)
+    }
+
+    /// 符號按 ↓：列出全形／半形與同一個鍵上的另一個符號，例如「：」也能換成「；」。
+    func testSymbolCandidates() {
+        let session = InputSession(lm: makeLM())
+        session.handle(.character(";", shift: true))
+        XCTAssertTrue(session.handle(.down).handled)
+        XCTAssertEqual(session.candidateList!.items.map(\.text), ["：", ":", "；", ";"])
+        session.handle(.character("3", shift: false))
+        XCTAssertEqual(session.markedText, "；")
+        XCTAssertEqual(session.handle(.enter).commit, "；")
+    }
+
+    func testSymbolCandidatesInsideSentence() {
+        let session = InputSession(lm: makeLM())
+        type(session, "su3")
+        session.handle(.character(",", shift: true))
+        type(session, "cl3")
+        XCTAssertEqual(session.markedText, "你，好")
+        session.handle(.left)
+        session.handle(.left)  // 游標移到「，」前面
+        session.handle(.down)
+        let items = session.candidateList!.items
+        XCTAssertEqual(items.first?.text, "，")
+        XCTAssertTrue(items.contains { $0.text == "," })
+        session.handle(.character("2", shift: false))
+        XCTAssertEqual(session.markedText, "你,好")
+        XCTAssertEqual(session.composition.cursor, 2, "選完游標移到符號後面")
+    }
+
+    func testSpaceCandidatesOfferFullWidthSpace() {
+        let session = InputSession(lm: makeLM())
+        type(session, "su3")
+        session.handle(.space)
+        session.handle(.down)
+        let items = session.candidateList!.items
+        XCTAssertEqual(items.map(\.text), [" ", "\u{3000}"])
+        XCTAssertEqual(items.map(\.displayText), ["半形空白", "全形空白"])
     }
 
     func testHalfWidthSymbolCommitsDirectly() {
@@ -297,7 +335,7 @@ final class DecoderTests: XCTestCase {
 final class ModelFileTests: XCTestCase {
     func testWriteAndLoadRoundTrip() throws {
         let lm = makeLM(bigrams: [("越", "更新", -1), ("你", "好", -0.5)], skips: [("越", "越", 2)])
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bunbun-test-\(UUID()).lm")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bangbang-test-\(UUID()).lm")
         defer { try? FileManager.default.removeItem(at: url) }
         try lm.write(to: url)
         let loaded = try LanguageModel.load(from: url)

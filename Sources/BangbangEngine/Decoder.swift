@@ -33,8 +33,25 @@ public struct Pin: Equatable {
 public struct Candidate: Equatable {
     public let start: Int
     public let length: Int
-    public let word: UInt32
+    /// 詞庫裡的詞；nil 表示符號候選（選了就直接換掉該格的符號）。
+    public let word: UInt32?
     public let text: String
+
+    public init(start: Int, length: Int, word: UInt32?, text: String) {
+        self.start = start
+        self.length = length
+        self.word = word
+        self.text = text
+    }
+
+    /// 候選字視窗上顯示的文字（空白看不見，改用文字說明）。
+    public var displayText: String {
+        switch text {
+        case " ": return "半形空白"
+        case "\u{3000}": return "全形空白"
+        default: return text
+        }
+    }
 }
 
 /// 讓使用者習慣影響選字的介面（見 UserModel）。
@@ -206,10 +223,14 @@ public struct Decoder {
     }
 
     /// 候選清單。游標在字前面時列出「從游標開始」的詞（長詞在前）；游標在最後時只列出最後一個字。
-    /// 同長度依上下文分數排序。
+    /// 同長度依上下文分數排序。該位置是符號時，列出它的全形／半形與同一個鍵上的其他符號。
     public func candidates(_ tokens: [Token], cursor: Int, walk: [WalkNode]) -> [Candidate] {
         let n = tokens.count
         guard n > 0 else { return [] }
+        let position = cursor < n ? cursor : n - 1
+        if case .literal(let symbol) = tokens[position] {
+            return Punctuation.alternatives(for: symbol).map { Candidate(start: position, length: 1, word: nil, text: $0) }
+        }
         var spans: [(start: Int, length: Int)] = []
         if cursor < n {
             guard tokens[cursor].syllable != nil else { return [] }

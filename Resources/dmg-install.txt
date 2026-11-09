@@ -11,13 +11,19 @@
 用 AirDrop、網路下載或訊息傳來的檔案，macOS 會標記為「來自網路」，
 沒有經過 Apple 公證的程式會被擋下來。請打開「終端機」執行下面這行，再登出、登入一次：
 
-  xattr -dr com.apple.quarantine "/Library/Input Methods/BunbunZhuyin.app"
+  xattr -dr com.apple.quarantine "/Library/Input Methods/BangbangZhuyin.app"
 
 【更新】
 再拖曳一次、選「取代」，然後登出、登入。
 
+【從 0.1 版（BunbunZhuyin）升級】
+0.2 版起英文名稱改為 BangbangZhuyin，系統會把它當成新的輸入法：
+1. 先在系統設定的輸入方式裡移除舊的「棒棒注音」。
+2. 把「/Library/Input Methods/BunbunZhuyin.app」丟到垃圾桶。
+3. 照上面【安裝】的步驟安裝新版。舊的選字記憶會自動搬過來。
+
 【移除】
 先在系統設定的輸入方式裡移除「棒棒注音」，
-再把「/Library/Input Methods/BunbunZhuyin.app」丟到垃圾桶，然後登出、登入。
+再把「/Library/Input Methods/BangbangZhuyin.app」丟到垃圾桶，然後登出、登入。
 
-選字記憶存在「~/Library/Application Support/BunbunZhuyin/」，每台 Mac 各自獨立。
+選字記憶存在「~/Library/Application Support/BangbangZhuyin/」，每台 Mac 各自獨立。

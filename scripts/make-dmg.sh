@@ -7,12 +7,14 @@ source "$(dirname "$0")/common.sh"
 UNIVERSAL=1 scripts/build.sh
 VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
 STAGE=build/dmg
-DMG="build/BunbunZhuyin-$VERSION.dmg"
+DMG="build/BangbangZhuyin-$VERSION.dmg"
 rm -rf $STAGE "$DMG"
 mkdir -p $STAGE
 cp -R "$APP" $STAGE/
 ln -s "/Library/Input Methods" "$STAGE/Input Methods"
 cp Resources/dmg-install.txt "$STAGE/安裝說明.txt"
-hdiutil create -volname "棒棒注音 $VERSION" -srcfolder $STAGE -ov -format UDZO "$DMG" > /dev/null
+# 明確指定映像大小：讓 hdiutil 自己估算時偶爾會估太小而失敗（「裝置已經沒有空間」）。
+SIZE_MB=$(( $(du -sm $STAGE | cut -f1) + 30 ))
+hdiutil create -volname "棒棒注音 $VERSION" -srcfolder $STAGE -fs HFS+ -size ${SIZE_MB}m -ov -format UDZO "$DMG" > /dev/null
 rm -rf $STAGE
 echo "已產生：$ROOT/$DMG（$(du -h "$DMG" | cut -f1)）"

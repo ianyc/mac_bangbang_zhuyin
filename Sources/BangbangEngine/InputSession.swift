@@ -248,8 +248,10 @@ public final class InputSession {
     private func choose(_ candidate: Candidate) {
         let wasAtEnd = composition.cursor == composition.count
         composition.select(candidate)
-        let key = ReadingKey(composition.tokens[candidate.start..<(candidate.start + candidate.length)].compactMap { $0.syllable?.code })
-        userModel?.learn(prev: composition.wordEnding(at: candidate.start), word: candidate.word, key: key)
+        if let word = candidate.word {
+            let key = ReadingKey(composition.tokens[candidate.start..<(candidate.start + candidate.length)].compactMap { $0.syllable?.code })
+            userModel?.learn(prev: composition.wordEnding(at: candidate.start), word: word, key: key)
+        }
         // 選完後游標移到這個詞後面，方便繼續往後修正。
         if !wasAtEnd { composition.moveCursor(to: candidate.start + candidate.length) }
         candidateList = nil
@@ -268,4 +270,37 @@ public enum Punctuation {
         "9": "（", "0": "）", "-": "_", "=": "+",
         "[": "『", "]": "』", "\\": "|", "`": "～",
     ]
+
+    /// 符號候選：同一組裡是該符號的全形／半形，以及同一個鍵上的另一個符號（含全形／半形）。
+    /// 例如「：」的鍵上還有「；」，所以候選是 ：:；;。每個符號都必須是單一字元。
+    static let groups: [[String]] = [
+        ["，", ",", "＜", "<", "〈", "《"],
+        ["。", ".", "．", "＞", ">", "〉", "》"],
+        ["？", "?", "／", "/"],
+        ["：", ":", "；", ";"],
+        ["、", "'", "；", "＂", "\"", "“", "”", "‘", "’"],
+        ["！", "!", "１", "1"],
+        ["@", "＠", "２", "2"],
+        ["#", "＃", "３", "3"],
+        ["$", "＄", "４", "4"],
+        ["%", "％", "５", "5"],
+        ["^", "＾", "︿", "６", "6"],
+        ["&", "＆", "７", "7"],
+        ["*", "＊", "８", "8"],
+        ["（", "(", "９", "9"],
+        ["）", ")", "０", "0"],
+        ["_", "＿", "-", "－", "—"],
+        ["+", "＋", "=", "＝"],
+        ["「", "『", "[", "{", "［", "｛", "【", "〔"],
+        ["」", "』", "]", "}", "］", "｝", "】", "〕"],
+        ["～", "~", "`", "‵"],
+        ["\\", "＼", "|", "｜"],
+        [" ", "\u{3000}"],
+    ]
+
+    /// 某個符號的候選清單：自己排第一，其餘照組內順序。不在任何一組時回傳空陣列。
+    public static func alternatives(for symbol: String) -> [String] {
+        guard let group = groups.first(where: { $0.contains(symbol) }) else { return [] }
+        return [symbol] + group.filter { $0 != symbol }
+    }
 }

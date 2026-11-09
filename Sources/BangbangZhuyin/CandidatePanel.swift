@@ -1,5 +1,5 @@
 import AppKit
-import BunbunEngine
+import BangbangEngine
 
 /// 候選字視窗：直式清單，數字 1–9 選字。不會搶走目前 App 的焦點。
 final class CandidatePanel: NSPanel {
@@ -71,7 +71,7 @@ final class CandidateListView: NSView {
         guard let list else { return .zero }
         var width: CGFloat = 60
         for i in list.pageRange {
-            let w = (list.items[i].text as NSString).size(withAttributes: [.font: candidateFont]).width
+            let w = (list.items[i].displayText as NSString).size(withAttributes: [.font: candidateFont]).width
             width = max(width, numberWidth + w + padding * 3)
         }
         let rows = CGFloat(list.pageRange.count)
@@ -94,7 +94,7 @@ final class CandidateListView: NSView {
             let numberSize = number.size(withAttributes: [.font: numberFont])
             number.draw(at: NSPoint(x: rowRect.minX + padding, y: rowRect.midY - numberSize.height / 2),
                         withAttributes: [.font: numberFont, .foregroundColor: numberColor])
-            let text = list.items[i].text as NSString
+            let text = list.items[i].displayText as NSString
             let textSize = text.size(withAttributes: [.font: candidateFont])
             text.draw(at: NSPoint(x: rowRect.minX + padding + numberWidth, y: rowRect.midY - textSize.height / 2),
                       withAttributes: [.font: candidateFont, .foregroundColor: textColor])

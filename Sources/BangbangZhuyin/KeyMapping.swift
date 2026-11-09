@@ -1,5 +1,5 @@
 import AppKit
-import BunbunEngine
+import BangbangEngine
 
 /// 把 NSEvent 轉成引擎用的 KeyEvent。依實體按鍵位置（keyCode）判斷，不受 Caps Lock 與鍵盤配置影響。
 enum KeyMapping {

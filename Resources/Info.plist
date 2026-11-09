@@ -4,34 +4,38 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_TW</string>
+	<key>CFBundleDisplayName</key>
+	<string>棒棒注音</string>
 	<key>CFBundleExecutable</key>
-	<string>BunbunZhuyin</string>
+	<string>BangbangZhuyin</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.ychsiao.inputmethod.BunbunZhuyin</string>
+	<string>com.ychsiao.inputmethod.BangbangZhuyin</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>BunbunZhuyin</string>
-	<key>CFBundleDisplayName</key>
-	<string>棒棒注音</string>
+	<string>BangbangZhuyin</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>13.0</string>
+	<string>2</string>
+	<key>InputMethodConnectionName</key>
+	<string>BangbangZhuyin_1_Connection</string>
+	<key>InputMethodServerControllerClass</key>
+	<string>BangbangInputController</string>
 	<key>LSBackgroundOnly</key>
 	<true/>
 	<key>LSHasLocalizedDisplayName</key>
 	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
-	<key>InputMethodConnectionName</key>
-	<string>BunbunZhuyin_1_Connection</string>
-	<key>InputMethodServerControllerClass</key>
-	<string>BunbunInputController</string>
+	<key>TICapsLockLanguageSwitchCapable</key>
+	<true/>
+	<key>TISIconIsTemplate</key>
+	<true/>
 	<key>TISIntendedLanguage</key>
 	<string>zh-Hant</string>
 	<key>tsInputMethodCharacterRepertoireKey</key>
@@ -40,9 +44,5 @@
 	</array>
 	<key>tsInputMethodIconFileKey</key>
 	<string>icon.tiff</string>
-	<key>TISIconIsTemplate</key>
-	<true/>
-	<key>TICapsLockLanguageSwitchCapable</key>
-	<true/>
 </dict>
 </plist>

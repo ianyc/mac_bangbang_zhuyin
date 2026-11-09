@@ -1,34 +1,41 @@
 import AppKit
-import BunbunEngine
+import BangbangEngine
 import InputMethodKit
 
 /// 全部輸入視窗共用的語言模型與選字記憶。
 enum Shared {
     static let lm: LanguageModel? = {
-        guard let url = Bundle.main.url(forResource: "bunbun", withExtension: "lm") else {
-            NSLog("BunbunZhuyin: 找不到 bunbun.lm")
+        guard let url = Bundle.main.url(forResource: "bangbang", withExtension: "lm") else {
+            NSLog("BangbangZhuyin: 找不到 bangbang.lm")
             return nil
         }
         do {
             return try LanguageModel.load(from: url)
         } catch {
-            NSLog("BunbunZhuyin: 無法載入語言模型：\(error)")
+            NSLog("BangbangZhuyin: 無法載入語言模型：\(error)")
             return nil
         }
     }()
 
     static let userModel: UserModel? = lm.map { lm in
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("BunbunZhuyin", isDirectory: true)
-        return UserModel(lm: lm, fileURL: dir.appendingPathComponent("user-model.json"))
+        let fm = FileManager.default
+        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let file = support.appendingPathComponent("BangbangZhuyin/user-model.json")
+        // 0.1 版英文名稱是 BunbunZhuyin：第一次啟動時把舊的選字記憶複製過來。
+        let legacy = support.appendingPathComponent("BunbunZhuyin/user-model.json")
+        if !fm.fileExists(atPath: file.path), fm.fileExists(atPath: legacy.path) {
+            try? fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.copyItem(at: legacy, to: file)
+        }
+        return UserModel(lm: lm, fileURL: file)
     }
 
     static let candidatePanel = CandidatePanel()
 }
 
 /// 每個 App 的輸入區各有一個 controller，負責把按鍵交給 InputSession，再把結果顯示到 App 裡。
-@objc(BunbunInputController)
-final class BunbunInputController: IMKInputController {
+@objc(BangbangInputController)
+final class BangbangInputController: IMKInputController {
     private var session: InputSession?
 
     override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {

@@ -7,8 +7,8 @@ if [[ -d /Applications/Xcode.app ]] && [[ "$(xcode-select -p 2>/dev/null)" == *C
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
 
-APP_NAME=BunbunZhuyin
+APP_NAME=BangbangZhuyin
 APP="$ROOT/build/$APP_NAME.app"
 INSTALL_DIR="$HOME/Library/Input Methods"
-MODEL="$ROOT/build/bunbun.lm"
+MODEL="$ROOT/build/bangbang.lm"
 CORPUS_FILES=(corpus/ptt/ppt_pretrain.json corpus/wiki/wiki_0.json corpus/wiki/wiki_1.json corpus/wiki/wiki_2.json corpus/wiki/wiki_3.json corpus/news/ey-train.json)

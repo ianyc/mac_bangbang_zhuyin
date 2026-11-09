@@ -34,7 +34,7 @@ public final class UserModel: ScoreAdjuster {
         for (i, w) in lm.words.enumerated() { index[w] = UInt32(i) }
         return index
     }()
-    private let saveQueue = DispatchQueue(label: "bunbun.usermodel.save")
+    private let saveQueue = DispatchQueue(label: "bangbang.usermodel.save")
 
     public init(lm: LanguageModel, fileURL: URL?) {
         self.lm = lm

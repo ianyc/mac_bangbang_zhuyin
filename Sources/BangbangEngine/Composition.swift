@@ -74,9 +74,20 @@ public final class Composition {
     /// 手動選字：把這個詞釘在該位置，再重新計算整句。
     /// 選字位置前面的字全部固定不變；後面的字可依新的上下文重新選。
     public func select(_ candidate: Candidate) {
+        guard let word = candidate.word else {
+            replaceLiteral(at: candidate.start, with: candidate.text)
+            return
+        }
         freezeText(before: candidate.start)
         pins.removeAll { $0.start < candidate.start + candidate.length && candidate.start < $0.end }
-        pins.append(Pin(start: candidate.start, length: candidate.length, word: candidate.word))
+        pins.append(Pin(start: candidate.start, length: candidate.length, word: word))
+        rewalk()
+    }
+
+    /// 把某一格的符號換成另一個符號（例如「：」換成「；」）。
+    public func replaceLiteral(at index: Int, with text: String) {
+        guard index < tokens.count, case .literal = tokens[index] else { return }
+        tokens[index] = .literal(text)
         rewalk()
     }
 

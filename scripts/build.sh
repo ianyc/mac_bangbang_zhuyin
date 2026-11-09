@@ -1,5 +1,5 @@
 #!/bin/zsh
-# 編譯並組成 build/BunbunZhuyin.app（本機簽章）。
+# 編譯並組成 build/BangbangZhuyin.app（本機簽章）。
 # UNIVERSAL=1 時編成同時支援 Apple 晶片與 Intel 的版本（打包 DMG 給其他 Mac 用）。
 set -euo pipefail
 source "$(dirname "$0")/common.sh"

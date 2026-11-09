@@ -1,14 +1,14 @@
-import BunbunEngine
+import BangbangEngine
 import Carbon
 import Foundation
 
 let usage = """
 用法：
-  bunbun-tool build-lm --data <小麥資料夾> --weights <讀音比例檔> [--discouraged <少用字檔>] --out <模型檔> [--heldout <檔案>] [--min-bigram N] [語料檔...]
-  bunbun-tool convert --lm <模型檔> <注音，音節以空白分隔>
-  bunbun-tool reading --lm <模型檔> <中文>
-  bunbun-tool eval --lm <模型檔> <測試句檔> [--limit N] [--show N]
-  bunbun-tool register <輸入法 .app 路徑>
+  bangbang-tool build-lm --data <小麥資料夾> --weights <讀音比例檔> [--discouraged <少用字檔>] --out <模型檔> [--heldout <檔案>] [--min-bigram N] [語料檔...]
+  bangbang-tool convert --lm <模型檔> <注音，音節以空白分隔>
+  bangbang-tool reading --lm <模型檔> <中文>
+  bangbang-tool eval --lm <模型檔> <測試句檔> [--limit N] [--show N]
+  bangbang-tool register <輸入法 .app 路徑>
 """
 
 var args = Array(CommandLine.arguments.dropFirst())
