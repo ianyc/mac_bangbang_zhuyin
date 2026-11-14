@@ -153,6 +153,37 @@ final class InputSessionTests: XCTestCase {
         XCTAssertEqual(session.composition.cursor, 2, "選完游標移到符號後面")
     }
 
+    /// 把『』的前半改成「，後半自動變成」；改後半也會帶動前半。
+    func testBracketPairChangesTogether() {
+        let session = InputSession(lm: makeLM())
+        session.handle(.character("[", shift: true))   // 『
+        type(session, "su3")
+        session.handle(.character("]", shift: true))   // 』
+        XCTAssertEqual(session.markedText, "『你』")
+        session.handle(.home)
+        session.handle(.down)
+        let index = session.candidateList!.items.firstIndex { $0.text == "「" }!
+        session.handle(.character(Character(String(index + 1)), shift: false))
+        XCTAssertEqual(session.markedText, "「你」")
+        session.handle(.end)
+        session.handle(.down)
+        let paren = session.candidateList!.items.firstIndex { $0.text == "】" }!
+        session.handle(.character(Character(String(paren + 1)), shift: false))
+        XCTAssertEqual(session.markedText, "【你】")
+    }
+
+    /// 巢狀括號依層數配對：改最外層的前半，只改到最外層的後半。
+    func testNestedBracketsMatchByDepth() {
+        let lm = makeLM()
+        let composition = Composition(decoder: Decoder(lm: lm))
+        for t in ["『", "『", "」", "』", "』"] { composition.insert(.literal(t)) }
+        composition.replaceLiteral(at: 0, with: "「")
+        XCTAssertEqual(composition.text, "「『」』」")
+        // 換成不是括號的符號時，另一半不動
+        composition.replaceLiteral(at: 1, with: "9")
+        XCTAssertEqual(composition.text, "「9」』」")
+    }
+
     func testSpaceCandidatesOfferFullWidthSpace() {
         let session = InputSession(lm: makeLM())
         type(session, "su3")
@@ -427,7 +458,7 @@ final class ModelFileTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: url) }
         try lm.write(to: url)
         let loaded = try LanguageModel.load(from: url)
-        XCTAssertEqual(loaded.words, lm.words)
+        XCTAssertEqual(Array(loaded.words), Array(lm.words))
         XCTAssertEqual(loaded.lexicon, lm.lexicon)
         XCTAssertEqual(loaded.logProb(5, 7), -1)
         XCTAssertEqual(loaded.logProb(1, 3), -0.5)

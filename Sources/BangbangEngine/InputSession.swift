@@ -258,6 +258,23 @@ public final class InputSession {
     }
 }
 
+/// 成對的括號。
+public enum Brackets {
+    static let pairs: [(String, String)] = [
+        ("「", "」"), ("『", "』"), ("（", "）"), ("〈", "〉"), ("《", "》"), ("【", "】"), ("〔", "〕"),
+        ("［", "］"), ("｛", "｝"), ("“", "”"), ("‘", "’"), ("(", ")"), ("[", "]"), ("{", "}"),
+    ]
+    static let closing = Dictionary(uniqueKeysWithValues: pairs.map { ($0.0, $0.1) })
+    static let opening = Dictionary(uniqueKeysWithValues: pairs.map { ($0.1, $0.0) })
+
+    /// 把括號 old 換成 new 時，配對的另一半應該換成什麼；new 不是同一邊的括號時回傳 nil。
+    static func counterpart(replacing old: String, with new: String) -> String? {
+        if closing[old] != nil { return closing[new] }
+        if opening[old] != nil { return opening[new] }
+        return nil
+    }
+}
+
 /// 標點符號（仿微軟新注音／小麥注音的標準大千配置）。
 public enum Punctuation {
     public static let unshifted: [Character: String] = [

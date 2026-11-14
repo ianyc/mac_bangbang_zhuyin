@@ -44,12 +44,6 @@ public final class UserModel: ScoreAdjuster {
     private var contextual: [ContextSlot: [UInt32: Pick]] = [:]
     private var global: [ReadingKey: [UInt32: Pick]] = [:]
     private var contextualBonusCache: [ContextSlot: Float] = [:]
-    private lazy var wordIndex: [String: UInt32] = {
-        var index: [String: UInt32] = [:]
-        index.reserveCapacity(lm.words.count)
-        for (i, w) in lm.words.enumerated() { index[w] = UInt32(i) }
-        return index
-    }()
     private let saveQueue = DispatchQueue(label: "bangbang.usermodel.save")
 
     public init(lm: LanguageModel, fileURL: URL?) {
@@ -130,6 +124,10 @@ public final class UserModel: ScoreAdjuster {
         guard let fileURL, let data = try? Data(contentsOf: fileURL),
               let decoded = try? JSONDecoder().decode(Stored.self, from: data) else { return }
         var converted = Stored(version: 2)
+        // 文字 → 編號的索引只在載入時用，用完就釋放。
+        var wordIndex: [String: UInt32] = [:]
+        wordIndex.reserveCapacity(lm.words.count)
+        for (i, w) in lm.words.enumerated() { wordIndex[w] = UInt32(i) }
 
         var readingsOfWord: [String: [String]] = [:]
         for (k, r) in decoded.unigram {

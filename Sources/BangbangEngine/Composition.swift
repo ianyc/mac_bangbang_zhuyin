@@ -85,10 +85,41 @@ public final class Composition {
     }
 
     /// 把某一格的符號換成另一個符號（例如「：」換成「；」）。
+    /// 換的是括號時，配對的另一半也一起換，例如把『』的前半改成「，後半自動變成」。
     public func replaceLiteral(at index: Int, with text: String) {
-        guard index < tokens.count, case .literal = tokens[index] else { return }
+        guard index < tokens.count, case .literal(let old) = tokens[index] else { return }
         tokens[index] = .literal(text)
+        if let match = matchingBracket(of: old, at: index),
+           let replacement = Brackets.counterpart(replacing: old, with: text) {
+            tokens[match] = .literal(replacement)
+        }
         rewalk()
+    }
+
+    /// 找出 index 位置的括號在組字區裡配對的另一半（依層數配對）。
+    private func matchingBracket(of bracket: String, at index: Int) -> Int? {
+        if let close = Brackets.closing[bracket] {
+            var depth = 0
+            for i in (index + 1)..<tokens.count {
+                guard case .literal(let t) = tokens[i] else { continue }
+                if t == bracket { depth += 1 }
+                if t == close {
+                    if depth == 0 { return i }
+                    depth -= 1
+                }
+            }
+        } else if let open = Brackets.opening[bracket] {
+            var depth = 0
+            for i in stride(from: index - 1, through: 0, by: -1) {
+                guard case .literal(let t) = tokens[i] else { continue }
+                if t == bracket { depth += 1 }
+                if t == open {
+                    if depth == 0 { return i }
+                    depth -= 1
+                }
+            }
+        }
+        return nil
     }
 
     /// 把 position 之前目前顯示的字都釘住。跨過 position 的詞拆成單字釘住前半段。

@@ -188,8 +188,11 @@ public struct Decoder {
                 guard let s = tokens[i + len - 1].syllable else { break }
                 syllables.append(s.code)
                 let key = ReadingKey(syllables)
-                let entries = lm.entries(for: key)
-                if entries.isEmpty { continue }
+                let (entries, hasLonger) = lm.lookup(syllables)
+                // 沒有以這串音節開頭的更長詞時，就不必再往後延伸。
+                if entries.isEmpty {
+                    if hasLonger { continue } else { break }
+                }
                 let beam = len == 1 ? singleCharBeam : phraseBeam
                 var taken = 0
                 for e in entries where taken < beam {
@@ -204,6 +207,7 @@ public struct Decoder {
                         nodes.append(LatticeNode(start: i, length: len, word: e.word, literal: nil, key: key, weight: e.readingWeight))
                     }
                 }
+                if !hasLonger { break }
             }
         }
         return nodes

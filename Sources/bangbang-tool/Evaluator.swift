@@ -19,8 +19,10 @@ final class Evaluator {
                 if key.codes.count == 1 { singleWeight[e.word, default: [:]][key.codes[0]] = e.readingWeight }
             }
         }
+        // 讀音依音節排序，同分時固定選第一個，評測結果才能重現（雜湊表順序每次執行都不同）。
+        for w in readingsOfWord.keys { readingsOfWord[w]!.sort { $0.codes.lexicographicallyPrecedes($1.codes) } }
         for (i, w) in lm.words.enumerated() where i > 0 { wordIndex[w] = UInt32(i) }
-        trie = ScalarTrie(words: lm.words)
+        trie = ScalarTrie(words: Array(lm.words))
     }
 
     /// 以詞庫斷詞後，每個詞取最常見的讀音。
