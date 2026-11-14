@@ -120,8 +120,10 @@ case "score":
 case "keys":
     // 模擬按鍵，例如：keys --lm x.lm "5j/ jp6<down>2<enter>"
     // 特殊鍵：<space> <enter> <esc> <bs> <del> <left> <right> <up> <down> <home> <end>，大寫字母代表 Shift+字母
+    // <pick:字> 在候選窗裡選指定的字（自動換頁）
+    let memoryPath = option("--memory")  // 指定記憶檔（會寫入，請用副本）
     let lm = loadModel()
-    let session = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: nil))
+    let session = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: memoryPath.map { URL(fileURLWithPath: $0) }))
     let specials: [String: KeyEvent] = [
         "space": .space, "enter": .enter, "esc": .escape, "bs": .backspace, "del": .forwardDelete,
         "left": .left, "right": .right, "up": .up, "down": .down, "home": .home, "end": .end,
@@ -140,7 +142,17 @@ case "keys":
     while !chars.isEmpty {
         let key: KeyEvent
         var label = String(chars[0])
-        if chars[0] == "<", let close = chars.firstIndex(of: ">"), let k = specials[String(chars[1..<close])] {
+        if chars[0] == "<", let close = chars.firstIndex(of: ">"), String(chars[1..<close]).hasPrefix("pick:") {
+            let target = String(chars[6..<close])
+            label = String(chars[0...close])
+            chars.removeFirst(close + 1)
+            guard let list = session.candidateList, let index = list.items.firstIndex(where: { $0.text == target }) else {
+                show(label + "（候選窗裡沒有）")
+                continue
+            }
+            while let current = session.candidateList, current.page != index / current.perPage { _ = session.handle(.pageDown) }
+            key = .character(Character(String(index % list.perPage + 1)), shift: false)
+        } else if chars[0] == "<", let close = chars.firstIndex(of: ">"), let k = specials[String(chars[1..<close])] {
             key = k
             label = String(chars[0...close])
             chars.removeFirst(close + 1)

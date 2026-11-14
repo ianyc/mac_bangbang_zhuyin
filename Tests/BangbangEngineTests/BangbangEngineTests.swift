@@ -294,6 +294,94 @@ final class InputSessionTests: XCTestCase {
     }
 }
 
+/// 選字記憶：同一格選最多次的勝出，平手看最近一次，每個字詞最多累計 3 次。
+final class UserModelTests: XCTestCase {
+    /// 打 ㄋㄧˇ、用 ↓ 選指定的字、按 Enter 送出，回傳送出的文字。
+    @discardableResult
+    private func pick(_ session: InputSession, _ text: String) -> String {
+        type(session, "su3")
+        session.handle(.down)
+        let index = session.candidateList!.items.firstIndex { $0.text == text }!
+        session.handle(.character(Character(String(index + 1)), shift: false))
+        return session.handle(.enter).commit
+    }
+
+    /// 不選字、直接打 ㄋㄧˇ 時預設出現的字。
+    private func defaultChoice(_ session: InputSession) -> String {
+        type(session, "su3")
+        return session.handle(.enter).commit
+    }
+
+    private func makeSession(_ lm: LanguageModel = makeLM()) -> InputSession {
+        InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: nil))
+    }
+
+    func testCorrectionTakesEffectImmediately() {
+        let session = makeSession()
+        pick(session, "妳")
+        XCTAssertEqual(defaultChoice(session), "妳")
+        pick(session, "你")  // 平手，最近選的是「你」
+        XCTAssertEqual(defaultChoice(session), "你")
+    }
+
+    func testMostPickedWins() {
+        let session = makeSession()
+        pick(session, "妳")
+        pick(session, "妳")
+        pick(session, "你")
+        XCTAssertEqual(defaultChoice(session), "妳", "2 次贏過 1 次")
+        pick(session, "你")
+        XCTAssertEqual(defaultChoice(session), "你", "2 比 2 平手，最近選的是「你」")
+    }
+
+    /// 次數只差一次，也要贏過常用程度差很多的字。
+    func testUserChoiceBeatsMuchMoreCommonWord() {
+        let session = makeSession()
+        pick(session, "你")
+        pick(session, "妳")
+        pick(session, "妳")
+        XCTAssertEqual(defaultChoice(session), "妳")
+        pick(session, "你")
+        XCTAssertEqual(defaultChoice(session), "你")
+        pick(session, "妳")  // 平手時看最近，不看哪個字比較常用
+        XCTAssertEqual(defaultChoice(session), "妳")
+    }
+
+    /// 選很多次也最多算 3 次：改選 3 次就能換過來。
+    func testCountIsCappedSoOldHabitsCanChange() {
+        let session = makeSession()
+        for _ in 0..<6 { pick(session, "妳") }
+        pick(session, "你")
+        pick(session, "你")
+        XCTAssertEqual(defaultChoice(session), "妳")
+        pick(session, "你")
+        XCTAssertEqual(defaultChoice(session), "你")
+    }
+
+    /// 不同的前一個詞是不同的格，互不影響。
+    func testContextsAreSeparate() {
+        let session = makeSession()
+        pick(session, "妳")  // 句首選「妳」
+        type(session, "cl3su3")  // 「好」後面的 ㄋㄧˇ
+        XCTAssertEqual(session.markedText, "好你")
+    }
+
+    /// 舊版記憶檔（上下文記錄沒有讀音）要能照常使用並轉成新格式。
+    func testLoadsOldFormat() throws {
+        let lm = makeLM()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("bangbang-memory-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let old = #"{"contextual":{"<s>\t妳":{"count":5,"lastUsed":1}},"unigram":{"妳\tㄋㄧˇ":{"count":5,"lastUsed":1}}}"#
+        try old.write(to: url, atomically: true, encoding: .utf8)
+        let session = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: url))
+        XCTAssertEqual(defaultChoice(session), "妳")
+        pick(session, "你")
+        pick(session, "你")
+        pick(session, "你")  // 舊的 5 次以 3 次計，改選 3 次就換過來
+        XCTAssertEqual(defaultChoice(session), "你")
+    }
+}
+
 final class DecoderTests: XCTestCase {
     func testUnigramOnly() {
         let decoder = Decoder(lm: makeLM())
