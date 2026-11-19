@@ -45,6 +45,8 @@ macOS 內建的注音輸入法有幾個讓人不順手的地方：Shift + 字母
 
 ---
 
+> 開發邏輯、所有設計決策、模型檔格式與 Windows 移植建議，見 [docs/DESIGN_AND_PORTING.md](docs/DESIGN_AND_PORTING.md)。
+
 ## 安裝
 
 ### 方法一：DMG 拖曳安裝（一般使用）
