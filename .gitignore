@@ -3,3 +3,8 @@ corpus/
 build/
 *.xcodeproj/xcuserdata/
 .DS_Store
+
+# Windows 版的建置產物與 Visual Studio 設定
+windows/out/
+.vs/
+CMakeUserPresets.json

@@ -1,0 +1,11 @@
+// 由 CMake 依 windows/CMakeLists.txt 的 project(VERSION) 產生，請不要直接修改產生的檔案。
+// 這個檔案也會被資源檔（.rc）引用，所以只用前置處理器語法。
+#ifndef BANGBANG_VERSION_H
+#define BANGBANG_VERSION_H
+
+#define BANGBANG_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define BANGBANG_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define BANGBANG_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define BANGBANG_VERSION_STRING "@PROJECT_VERSION@"
+
+#endif

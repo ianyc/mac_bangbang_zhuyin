@@ -1,0 +1,30 @@
+#pragma code_page(65001)
+#include <winresrc.h>
+#include "BangbangVersion.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION BANGBANG_VERSION_MAJOR, BANGBANG_VERSION_MINOR, BANGBANG_VERSION_PATCH, 0
+ PRODUCTVERSION BANGBANG_VERSION_MAJOR, BANGBANG_VERSION_MINOR, BANGBANG_VERSION_PATCH, 0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404b0"
+        BEGIN
+            VALUE "FileDescription", "棒棒注音"
+            VALUE "FileVersion", BANGBANG_VERSION_STRING
+            VALUE "InternalName", "BangbangZhuyin"
+            VALUE "OriginalFilename", "BangbangZhuyin.dll"
+            VALUE "ProductName", "棒棒注音"
+            VALUE "ProductVersion", BANGBANG_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0404, 1200
+    END
+END
