@@ -1,6 +1,10 @@
 #pragma code_page(65001)
 #include <winresrc.h>
 #include "BangbangVersion.h"
+#include "resource.h"
+
+// 輸入法圖示（鍵盤清單、工作列）。由 windows/scripts/make-icon.ps1 產生。
+IDI_BANGBANG ICON "BangbangZhuyin.ico"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION BANGBANG_VERSION_MAJOR, BANGBANG_VERSION_MINOR, BANGBANG_VERSION_PATCH, 0

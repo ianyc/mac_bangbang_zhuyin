@@ -1,35 +1,42 @@
-// 棒棒注音 TSF 輸入法 DLL 的進入點。
-// 第 0 階段只有骨架：COM 匯出函式都還沒有實作，第 3 階段再補上文字服務與註冊。
+// 棒棒注音 TSF 輸入法 DLL 的進入點（in-process COM 伺服器）。
 #include <windows.h>
 
+#include "ClassFactory.h"
+#include "Globals.h"
 #include "Guids.h"
-
-namespace {
-HINSTANCE g_module = nullptr;
-LONG g_lockCount = 0;  // 第 3 階段由 class factory 與物件計數使用
-}  // namespace
+#include "Register.h"
 
 BOOL APIENTRY DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        g_module = instance;
+        bangbang::g_module = instance;
         DisableThreadLibraryCalls(instance);
     }
     return TRUE;
 }
 
-STDAPI DllGetClassObject(REFCLSID, REFIID, LPVOID* ppv) {
-    if (ppv) *ppv = nullptr;
-    return CLASS_E_CLASSNOTAVAILABLE;
+STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, LPVOID* ppv) {
+    if (!ppv) return E_POINTER;
+    *ppv = nullptr;
+    if (!IsEqualCLSID(clsid, bangbang::kTextServiceClsid)) return CLASS_E_CLASSNOTAVAILABLE;
+    return bangbang::guarded([&] {
+        auto* factory = new bangbang::ClassFactory();
+        const HRESULT hr = factory->QueryInterface(riid, ppv);
+        factory->Release();
+        return hr;
+    });
 }
 
 STDAPI DllCanUnloadNow() {
-    return g_lockCount == 0 ? S_OK : S_FALSE;
+    return bangbang::dllCanUnload() ? S_OK : S_FALSE;
 }
 
 STDAPI DllRegisterServer() {
-    return E_NOTIMPL;
+    return bangbang::guarded([] { return bangbang::registerAll(); });
 }
 
 STDAPI DllUnregisterServer() {
-    return E_NOTIMPL;
+    return bangbang::guarded([] {
+        bangbang::unregisterAll();
+        return S_OK;
+    });
 }

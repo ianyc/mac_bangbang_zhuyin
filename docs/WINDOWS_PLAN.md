@@ -3,7 +3,7 @@
 > 這份文件記錄 Windows 版「要怎麼做、做到哪裡算完成」。行為規格以 [DESIGN_AND_PORTING.md](DESIGN_AND_PORTING.md)（以下稱「設計文件」）第 3 節與 37 個單元測試為準，這裡不重複。
 >
 > - 建立：2026-11-20
-> - 狀態：第 0～2 階段完成，等待驗收（2026-11-20）。下一步是第 3 階段（最小 TSF 輸入法）。
+> - 狀態：第 0～2 階段完成（2026-11-20）。第 3 階段程式完成、自動測試通過，等你在記事本驗收（2026-11-21）。
 
 ## 進度
 
@@ -12,7 +12,7 @@
 | 0 | 環境與骨架 | 完成（2026-11-20）：x64／x86 都能編譯；GUID 已固定在 `windows/tip/Guids.h` |
 | 1 | 引擎移植＋單元測試 | 完成（2026-11-20）：37 個移植測試＋21 個 Windows 新增測試，x64／x86、Debug／Release 全部通過 |
 | 2 | 真模型＋bangbang-tool＋正確率對齊 | 完成（2026-11-20）：三組正確率與 Mac 版相同，見 3 節第 2 階段的「實測結果」 |
-| 3 | 最小 TSF 輸入法（記事本能打字） | |
+| 3 | 最小 TSF 輸入法（記事本能打字） | 完成（2026-11-21 驗收）：DLL、註冊腳本、testpad 完成；TSF 自動測試 x64／x86 各 20 項通過；記事本、設定、開始功能表搜尋、Claude、Chrome 都能用。開發版改部署到 `windows\out\deploy`（見實作紀錄的 MSIX 轉存問題） |
 | 4 | 候選窗 | |
 | 5 | 中英切換（單按 Shift）＋工作列圖示 | |
 | 6 | 選字記憶存檔（多程序）＋程式相容性 | |
@@ -117,6 +117,7 @@ windows/
   - 寫入：鎖檔（`LockFileEx`）→ 重新讀檔並合併 → 寫暫存檔 → 取代原檔 → 解鎖。不會互相覆蓋，也不會寫壞。
   - 讀取：開始組字前檢查檔案的修改時間，被別的程式更新過就重新載入。A 程式學到的，B 程式下一次打字就用得到。
   - 載入要輕：每個程式都會載入一次記憶，所以不建整份詞表的文字索引。
+- **封裝程式（MSIX）的 AppData 虛擬化**（2026-11-21 發現並實測確認）：Claude、Windows 11 記事本都是封裝成 MSIX 的完整信任程式。這類程式（和它們開出來的子程式）在 AppData 新建的檔案，會轉存到 `%LOCALAPPDATA%\Packages\<程式>\LocalCache` 底下的私有位置，其他程式看不到；第 3 階段的開發版部署就是因此只有 Claude 看得到（見第 3 階段的實作紀錄）。所以在這些程式裡學到的選字，寫不進共用的記憶檔，記憶會分散在各程式的私有資料夾。可能的做法：記憶檔改放在不受虛擬化影響的位置（例如不在 AppData 的使用者資料夾），或交給一個不在封裝環境裡的小程式（例如 out-of-proc COM 伺服器）代寫。
 - **Microsoft Store 程式（AppContainer）**：
   - 模型放在 Program Files，預設就讀得到。
   - 記憶檔在使用者資料夾，沙盒裡可能讀寫不到，所以讀寫失敗一律安靜略過，不能當掉。
@@ -199,10 +200,36 @@ windows/
   - 游標移動、Backspace、Delete、Esc、Enter 送出、空白鍵進組字區、全形標點、Shift＋字母輸出半形英文，都符合規格。
   - Ctrl 組合鍵照常運作。
   - 反覆切換輸入法、切換視窗都不會當掉。
+- **實作紀錄**（2026-11-21）：
+  - 開發版部署在 `windows\out\deploy`（不納入 git），用 `windows\scripts\register.ps1` 部署與註冊（第一次、或位置與類別改變時要按 UAC），並開放唯讀權限給沙盒程式（ALL APPLICATION PACKAGES、ALL RESTRICTED APPLICATION PACKAGES）。`register.ps1 -Install` 改裝到 `Program Files\BangbangZhuyin`（和正式安裝相同的位置）。
+  - 註冊的 TSF 類別：TIP_KEYBOARD、DISPLAYATTRIBUTEPROVIDER、TIPCAP_SYSTRAYSUPPORT、TIPCAP_COMLESS、TIPCAP_IMMERSIVESUPPORT、TIPCAP_UIELEMENTENABLED（宣告支援 UI-less，第 4 階段的候選窗必須照這個規則做）、TIPCAP_INPUTMODECOMPARTMENT（啟用時把 `GUID_COMPARTMENT_KEYBOARD_OPENCLOSE` 設成開啟、`INPUTMODE_CONVERSION` 設成中文；第 5 階段的中英切換要更新它們）。
+  - TIPCAP_SECUREMODE 只有 DLL 放在 Program Files 或 Windows 資料夾時才註冊（`register.ps1 -Install`）：安全模式會在登入畫面這類以系統身分執行的地方載入輸入法，DLL 放在使用者改得動的資料夾就等於提權漏洞。安全模式下（`TF_TMAE_SECUREMODE`）選字記憶只放在記憶體。
+  - IMMERSIVESUPPORT 是 Store 程式（AppContainer，例如開始功能表搜尋）載入輸入法的條件。沙盒程式裡的選字記憶先只放在記憶體。
+  - 檢查哪個程式實際載入了哪個輸入法：`windows\scripts\which-ime.ps1`。
+  - **新版記事本一直改用微軟注音，真正的原因是 MSIX 的 AppData 轉存**（2026-11-21 查明）：
+    - Claude 桌面版是 MSIX 封裝程式，Claude Code 執行的指令與從它開出來的程式（testpad、regsvr32）都在 Claude 的封裝環境裡。開發版原本部署在 `%LOCALAPPDATA%\BangbangZhuyin\dev`，在封裝環境裡新建的 AppData 檔案會轉存到 `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\BangbangZhuyin\dev`，只有 Claude 自己看得到。
+    - 所以只有 Claude 與 testpad 載入得到棒棒注音；記事本、設定、開始功能表搜尋等程式照註冊的路徑找不到 DLL，TSF 改用同語言的微軟注音（打出「月更新越南用」、出現微軟的選字框），設定的鍵盤清單也不列出棒棒注音（所以微軟注音的「移除」不能按）。
+    - 使用者在 Claude 外面執行 `register.ps1 -Install`（Program Files）和 `register.ps1`（寫到真正的 AppData）之後，記事本、設定、開始功能表搜尋都正常，關掉「使用舊版的微軟注音」也正常。證據：從 Claude 裡寫進 `%LOCALAPPDATA%\BangbangZhuyin` 的測試檔出現在 Claude 的 LocalCache；同一個 DLL 路徑，記事本載入的是新版（映像大小 4,304,896），Claude 裡看到的是 12:31 的舊版。
+    - 因此開發版改部署到 `windows\out\deploy`（D 槽，不會轉存）。從 Claude 裡寫 HKCU 也會轉存，例如替棒棒注音加的 `Tsf3Override` 旗標系統根本沒看到（已刪除）。
+    - 第 6 階段要處理同一個問題：選字記憶檔在 `%APPDATA%`，輸入法在 Claude、記事本這些封裝程式裡寫入時，會各自轉存到它們的私有資料夾，記憶會分散。
+    - 調查中補上的 UIELEMENTENABLED、INPUTMODECOMPARTMENT、SECUREMODE 都不是記事本問題的原因，但 SampleIME 都有註冊、之後的階段也用得到，保留。
+  - 調查時確認、之後除錯可能用得到的事實：
+    - 新版記事本（11.2607，WinAppSDK 2.7）自帶的 `riched20.dll` 透過 `Windows.UI.Text.Core`（CoreText，類別 `CTSF30Base`）接文字輸入；棒棒注音照樣以傳統 TIP 的方式載入它的行程。
+    - 微軟新式輸入法有私有類別 `{3AF314A2-D79F-4B1B-9992-15086D339B05}`（中文另有 `{74769EE9-4A66-4F9D-90D6-BF8B7C3EB461}`）。「使用舊版的微軟輸入法」存在 `HKCU\Software\Microsoft\Input\TSF\Tsf3Override\{CLSID}` 的 `NoTsf3Override*`；微軟注音的舊版設定檔在 HKLM 是 `Enable = 0`、`ProfileFlags = 2`（`TF_RP_HIDDENINSETTINGUI`）。
+    - msctf 的 TraceLogging provider `{4F6A3C95-B86C-59F7-D8ED-D5B0B6A683D6}`（要系統管理員才能錄）會記錄每個程式的 `InputSessionStarted`／`InputSessionFinalized`：用的是哪個 TIP、按了幾個鍵、其中幾個交給輸入法。DLL 載入失敗時事件裡不會寫原因。
+    - 輸入法的除錯訊息（`OutputDebugString`）可以用 DBWIN 方式收集；啟用時會印出 `ActivateEx` 與 `GetActiveFlags` 的旗標。testpad、Chrome 都是 `0x0`、`0x80000000`（一般模式）。
+  - 轉換模式 compartment：只在 `ActivateEx` 裡設定時，事後讀到的是 `VT_EMPTY`（開關是 1）；改成在 `ITfActiveLanguageProfileNotifySink::OnActivated` 再設定一次（同 SampleIME）後，testpad 讀到「開啟、中文」，兩處的 `SetValue` 都回傳 S_OK。有一次從 `Start-Process` 啟動的 testpad 仍讀到 `VT_EMPTY`，第 5 階段加上 compartment 事件通知時再追。
+  - testpad 的按鍵測試需要測試視窗在前景。使用者剛操作過電腦時，Windows 的前景鎖定不讓背景程式搶焦點，20 項會全部標成「略過」；這時改由使用者在自己的終端機執行 testpad（從前景程式啟動的程式可以取得前景）。
+  - 按鍵依掃描碼（實體位置）對應；Ctrl／Alt 組合鍵交還；Caps Lock 鎖定時英文直接交還，組字中按 Caps Lock 先送出組字區（同 Mac 版）。
+  - `testpad --selftest`：在 RichEdit 上啟用棒棒注音，用 ITfKeystrokeMgr 模擬按鍵，逐鍵比對「吃／不吃」並比對文件文字與引擎結果。一般 EDIT 控制項走 IMM32 相容層，按鍵不經過 ITfKeystrokeMgr，無法這樣模擬，改用手動測試。
+    - 測試視窗不在前景時（例如測試中點了別的視窗），RichEdit 沒有 TSF 焦點，按鍵不會交給輸入法；這種情況標成「略過」、結束代碼 3，不算失敗。
+    - 另外檢查啟用後的輸入模式 compartment（開關、轉換模式）。`--probe-compartments` 會先印出執行緒與全域 compartment 的診斷資訊。
+  - 候選窗還沒有（第 4 階段）：按 ↓ 時只會看到選字那段變成粗底線，選字要等第 4 階段。
 
 ### 第 4 階段：候選窗（中）
 
 - 依 2.3 的做法實作候選窗，候選窗的操作照設計文件 3.4。
+- 第 3 階段已註冊 UIELEMENTENABLED，所以候選窗要支援 UI-less：顯示前先用 `ITfUIElementMgr::BeginUIElement` 詢問，程式表示要自己畫（`pbShow = FALSE`）時就不顯示，改由程式透過 `ITfCandidateListUIElement` 取得候選。
 - **完成標準**：
   - 設計文件 8.9 裡和候選有關的項目全部通過：打「中文輸入法」後游標在最後按 ↓ 只出現「法」、游標在「輸」前面按 ↓ 列出「輸入法」、目前選字排第一、把「中文」的「文」改成「聞」時「中」不變。
   - 符號候選與括號配對正常。
@@ -212,6 +239,7 @@ windows/
 ### 第 5 階段：中英切換＋工作列圖示（小～中）
 
 - 依 2.5 實作。開始前先確認 2.5 的待確認事項。
+- 第 3 階段留下的已知問題：輸入法啟用時把 `INPUTMODE_CONVERSION` 設成中文（`SetValue` 回傳 S_OK），但 testpad 視窗在前景時，事後讀到的常是 `VT_EMPTY`；不在前景時則保持中文（2026-11-21 實測）。這一階段要加上 compartment 事件通知（`ITfCompartmentEventSink`），找出是誰清掉的、何時要重新設定，並把 testpad 的輸入模式檢查改回「轉換模式必須是中文」才算通過。
 - **完成標準**：
   - 單按 Shift 會切換；Shift＋字母、按住 Shift 點選都不會切換。
   - 切換前會先送出組字區。
