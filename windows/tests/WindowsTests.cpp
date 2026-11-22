@@ -2,17 +2,22 @@
 // - wouldHandle 與 handle 的判斷一致（TSF 會先用 OnTestKeyDown 問要不要吃這個鍵）。
 // - BMP 以外的字元在 UTF-16 的位置換算。
 // - 記憶檔與 Mac 版互相讀得懂。
+// - 多個程式同時讀寫同一個記憶檔（鎖檔、合併、重新載入）。
 // - 壞掉的模型檔在載入時就被拒絕，不會讓宿主程式當掉。
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <sstream>
+#include <stdexcept>
 
 #include <nlohmann/json.hpp>
 
 #include "InputSession.h"
 #include "LanguageModel.h"
+#include "SharedFile.h"
 #include "ShiftTapDetector.h"
 #include "TestSupport.h"
 #include "UserModel.h"
@@ -55,6 +60,25 @@ std::string readFile(const std::filesystem::path& path) {
 void writeFile(const std::filesystem::path& path, std::string_view content) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out.write(content.data(), static_cast<std::streamsize>(content.size()));
+}
+
+nlohmann::json readJson(const std::filesystem::path& path) {
+    return nlohmann::json::parse(readFile(path));
+}
+
+/// 打字後在候選窗選 word，再按 Enter 送出（會學習這次的選字）。
+std::string typeAndPick(InputSession& session, std::string_view keys, const std::string& word) {
+    type(session, keys);
+    session.handle(key(T::Down));
+    if (!session.candidateList()) return "（沒有候選窗）";
+    pickNumber(session, indexOf(session.candidateList()->items, word));
+    return session.handle(key(T::Enter)).commit;
+}
+
+/// 打字後直接按 Enter 送出預設的結果。
+std::string typeAndCommit(InputSession& session, std::string_view keys) {
+    type(session, keys);
+    return session.handle(key(T::Enter)).commit;
 }
 
 }  // namespace
@@ -229,8 +253,9 @@ TEST(NonBmpTests, MarkedTextAndUtf16Offsets) {
 
 /// Mac 版（Swift JSONEncoder，prettyPrinted＋sortedKeys）寫出的記憶檔可以直接讀。
 TEST(UserModelFileTests, ReadsMacFormatFile) {
-    TempFile file("bangbang-mac-memory", ".json");
-    writeFile(file.path, R"({
+    TempDir dir("bangbang-mac-memory");
+    const auto path = dir.path / "user-model.json";
+    writeFile(path, R"({
   "contextual" : {
     "<s>\t妳\tㄋㄧˇ" : {
       "count" : 2,
@@ -251,7 +276,7 @@ TEST(UserModelFileTests, ReadsMacFormatFile) {
 }
 )");
     const auto lm = makeLM();
-    UserModel memory(lm, file.path);
+    UserModel memory(lm, path);
     InputSession session(lm, &memory);
     type(session, "su3");
     EXPECT_EQ(session.handle(key(T::Enter)).commit, "妳");
@@ -259,10 +284,11 @@ TEST(UserModelFileTests, ReadsMacFormatFile) {
 
 /// 寫出的記憶檔是 Mac 版讀得懂的格式：第 2 版、鍵是文字、讀音以空白分隔、一聲不加符號。
 TEST(UserModelFileTests, WritesFormatMacCanRead) {
-    TempFile file("bangbang-memory-out", ".json");
+    TempDir dir("bangbang-memory-out");
+    const auto path = dir.path / "user-model.json";
     const auto lm = makeLM();
     {
-        UserModel memory(lm, file.path);
+        UserModel memory(lm, path);
         InputSession session(lm, &memory);
         type(session, "su3");  // 句首的 ㄋㄧˇ 選「妳」
         session.handle(key(T::Down));
@@ -274,7 +300,7 @@ TEST(UserModelFileTests, WritesFormatMacCanRead) {
         EXPECT_EQ(session.handle(key(T::Enter)).commit, "中聞");
     }
 
-    const std::string text = readFile(file.path);
+    const std::string text = readFile(path);
     ASSERT_FALSE(text.empty());
     EXPECT_EQ(text.front(), '{') << "不能有 BOM";
     const auto root = nlohmann::json::parse(text);
@@ -288,20 +314,326 @@ TEST(UserModelFileTests, WritesFormatMacCanRead) {
     EXPECT_TRUE(root.at("unigram").contains("聞\tㄨㄣˊ"));
 
     // 重新載入後記憶仍在
-    UserModel reloaded(lm, file.path);
+    UserModel reloaded(lm, path);
     InputSession again(lm, &reloaded);
     type(again, "su3");
     EXPECT_EQ(again.handle(key(T::Enter)).commit, "妳");
 }
 
 TEST(UserModelFileTests, CorruptFileIsIgnored) {
-    TempFile file("bangbang-memory-bad", ".json");
-    writeFile(file.path, "{\"contextual\": {\"<s>\t");
+    TempDir dir("bangbang-memory-bad");
+    const auto path = dir.path / "user-model.json";
+    writeFile(path, "{\"contextual\": {\"<s>\t");
     const auto lm = makeLM();
-    UserModel memory(lm, file.path);
+    UserModel memory(lm, path);
     InputSession session(lm, &memory);
     type(session, "su3");
     EXPECT_EQ(session.handle(key(T::Enter)).commit, "你");
+}
+
+/// 學習時，壞掉的記憶檔改名成 .corrupt 保留（可能是手動改到一半），再寫入新的記憶檔。
+TEST(UserModelFileTests, CorruptFileIsSetAsideWhenLearning) {
+    TempDir dir("bangbang-memory-bad");
+    const auto path = dir.path / "user-model.json";
+    writeFile(path, "{\"contextual\": {\"<s>\t");
+    const auto lm = makeLM();
+    UserModel memory(lm, path);
+    InputSession session(lm, &memory);
+    EXPECT_EQ(typeAndPick(session, "su3", "妳"), "妳");
+    EXPECT_EQ(readFile(dir.path / "user-model.json.corrupt"), "{\"contextual\": {\"<s>\t");
+    EXPECT_TRUE(readJson(path).at("contextual").contains("<s>\t妳\tㄋㄧˇ"));
+}
+
+// MARK: - 多個程式共用記憶檔（每個 UserModel 代表一個程式）
+
+/// A 程式學到的，B 程式下次組字就用得到；B 改選之後，A 也跟著改。
+TEST(SharedUserModelTests, LearningReachesOtherPrograms) {
+    TempDir dir("bangbang-shared");
+    const auto path = dir.path / "user-model.json";
+    const auto lm = makeLM();
+    UserModel a(lm, path), b(lm, path);
+    InputSession sa(lm, &a), sb(lm, &b);
+    EXPECT_EQ(typeAndPick(sa, "su3", "妳"), "妳");
+    EXPECT_TRUE(b.refresh());
+    EXPECT_EQ(typeAndCommit(sb, "su3"), "妳");
+    EXPECT_EQ(typeAndPick(sb, "su3", "你"), "你");
+    EXPECT_TRUE(a.refresh());
+    EXPECT_EQ(typeAndCommit(sa, "su3"), "你");
+    EXPECT_FALSE(a.refresh()) << "檔案沒變時不用重新載入";
+    EXPECT_FALSE(b.refresh()) << "自己寫的檔案不用重新載入";
+}
+
+/// 兩個程式各自學習、中間沒有重新載入：寫入時會先合併，誰的記憶都不會被蓋掉。
+TEST(SharedUserModelTests, SimultaneousLearningIsMerged) {
+    TempDir dir("bangbang-shared");
+    const auto path = dir.path / "user-model.json";
+    const auto lm = makeLM();
+    UserModel a(lm, path), b(lm, path);
+    InputSession sa(lm, &a), sb(lm, &b);
+    EXPECT_EQ(typeAndPick(sa, "su3", "妳"), "妳");
+    EXPECT_EQ(typeAndPick(sb, "m,4", "越"), "越");  // 句首的 ㄩㄝˋ 預設是「月」；B 還不知道 A 學了什麼
+    const auto root = readJson(path);
+    EXPECT_TRUE(root.at("contextual").contains("<s>\t妳\tㄋㄧˇ")) << root.dump();
+    EXPECT_TRUE(root.at("contextual").contains("<s>\t越\tㄩㄝˋ")) << root.dump();
+    EXPECT_EQ(typeAndCommit(sb, "su3"), "妳") << "B 寫入時已經合併了 A 的記憶";
+    EXPECT_TRUE(a.refresh());
+    EXPECT_EQ(typeAndCommit(sa, "m,4"), "越");
+}
+
+/// 兩個程式從同一個狀態各選一次同一個詞：檔案裡是 2 次，不是 1 次。
+TEST(SharedUserModelTests, CountsAddUpAcrossPrograms) {
+    TempDir dir("bangbang-shared");
+    const auto path = dir.path / "user-model.json";
+    const auto lm = makeLM();
+    UserModel a(lm, path), b(lm, path);
+    InputSession sa(lm, &a), sb(lm, &b);
+    typeAndPick(sa, "su3", "妳");
+    typeAndPick(sb, "su3", "妳");
+    const auto root = readJson(path);
+    EXPECT_EQ(root.at("unigram").at("妳\tㄋㄧˇ").at("count"), 2);
+    EXPECT_EQ(root.at("contextual").at("<s>\t妳\tㄋㄧˇ").at("count"), 2);
+}
+
+/// 一個程式清除記憶、或使用者刪掉記憶檔：其他程式下次組字時也跟著忘掉。
+TEST(SharedUserModelTests, ForgettingReachesOtherPrograms) {
+    TempDir dir("bangbang-shared");
+    const auto path = dir.path / "user-model.json";
+    const auto lm = makeLM();
+    UserModel a(lm, path), b(lm, path);
+    InputSession sa(lm, &a), sb(lm, &b);
+    typeAndPick(sa, "su3", "妳");
+    EXPECT_TRUE(b.refresh());
+    EXPECT_EQ(typeAndCommit(sb, "su3"), "妳");
+    a.reset();
+    EXPECT_TRUE(b.refresh());
+    EXPECT_EQ(typeAndCommit(sb, "su3"), "你");
+    typeAndPick(sb, "su3", "妳");
+    EXPECT_TRUE(a.refresh());
+    EXPECT_EQ(typeAndCommit(sa, "su3"), "妳");
+    std::filesystem::remove(path);
+    EXPECT_TRUE(a.refresh());
+    EXPECT_EQ(typeAndCommit(sa, "su3"), "你");
+}
+
+/// 別的程式拿著鎖不放：學習不會卡住，變更先留在記憶體，下次學習時一起寫進去。
+TEST(SharedUserModelTests, BusyLockDoesNotBlockOrLoseLearning) {
+    using namespace std::chrono_literals;
+    TempDir dir("bangbang-shared");
+    const auto path = dir.path / "user-model.json";
+    const auto lm = makeLM();
+    UserModel a(lm, path);
+    InputSession sa(lm, &a);
+    {
+        const auto held = FileLock::acquire(dir.path / "user-model.json.lock", 0ms);
+        ASSERT_TRUE(held);
+        const auto start = std::chrono::steady_clock::now();
+        EXPECT_EQ(typeAndPick(sa, "su3", "妳"), "妳");
+        EXPECT_LT(std::chrono::steady_clock::now() - start, 2s);
+        EXPECT_EQ(a.unsavedChanges(), 1u);
+        EXPECT_FALSE(std::filesystem::exists(path));
+        EXPECT_EQ(typeAndCommit(sa, "su3"), "妳") << "記憶體裡已經生效";
+    }
+    EXPECT_EQ(typeAndPick(sa, "5j/ jp6", "聞"), "中聞");
+    EXPECT_EQ(a.unsavedChanges(), 0u);
+    const auto root = readJson(path);
+    EXPECT_TRUE(root.at("contextual").contains("<s>\t妳\tㄋㄧˇ"));
+    EXPECT_TRUE(root.at("contextual").contains("中\t聞\tㄨㄣˊ"));
+}
+
+/// 還沒寫進去的變更，重新載入別的程式的記憶之後仍然保留，之後也會寫進去。
+TEST(SharedUserModelTests, UnsavedChangesSurviveRefresh) {
+    using namespace std::chrono_literals;
+    TempDir dir("bangbang-shared");
+    const auto path = dir.path / "user-model.json";
+    const auto lm = makeLM();
+    UserModel a(lm, path), b(lm, path);
+    InputSession sa(lm, &a), sb(lm, &b);
+    {
+        const auto held = FileLock::acquire(dir.path / "user-model.json.lock", 0ms);
+        ASSERT_TRUE(held);
+        typeAndPick(sa, "su3", "妳");
+        ASSERT_EQ(a.unsavedChanges(), 1u);
+    }
+    typeAndPick(sb, "m,4", "越");
+    EXPECT_TRUE(a.refresh());
+    EXPECT_EQ(typeAndCommit(sa, "m,4"), "越");
+    EXPECT_EQ(typeAndCommit(sa, "su3"), "妳");
+    EXPECT_TRUE(a.flush());
+    EXPECT_TRUE(b.refresh());
+    EXPECT_EQ(typeAndCommit(sb, "su3"), "妳");
+}
+
+/// 寫到一半當掉的程式留下的暫存檔，下次寫入時清掉。
+TEST(SharedUserModelTests, StaleTempFilesAreRemoved) {
+    TempDir dir("bangbang-shared");
+    const auto path = dir.path / "user-model.json";
+    writeFile(dir.path / "user-model.json.999-1.tmp", "half written");
+    const auto lm = makeLM();
+    UserModel a(lm, path);
+    InputSession sa(lm, &a);
+    typeAndPick(sa, "su3", "妳");
+    std::vector<std::string> names;
+    for (const auto& entry : std::filesystem::directory_iterator(dir.path)) names.push_back(entry.path().filename().string());
+    std::sort(names.begin(), names.end());
+    EXPECT_EQ(names, (std::vector<std::string>{"user-model.json", "user-model.json.lock"}));
+}
+
+namespace {
+
+constexpr const wchar_t* kChildFileVariable = L"BANGBANG_TEST_SHARED_FILE";
+constexpr const wchar_t* kChildIndexVariable = L"BANGBANG_TEST_CHILD_INDEX";
+constexpr int kChildPrograms = 4;
+constexpr int kChildRounds = 2;
+const char* const kChildPrevWords[kChildPrograms] = {"你", "好", "中", "更"};
+
+/// 迷你模型裡每個讀音的每個詞。
+std::vector<std::pair<std::string, std::string>> everyPick() {
+    return {{"你", "ㄋㄧˇ"}, {"妳", "ㄋㄧˇ"}, {"好", "ㄏㄠˇ"}, {"你好", "ㄋㄧˇ ㄏㄠˇ"}, {"越", "ㄩㄝˋ"}, {"月", "ㄩㄝˋ"},
+            {"更新", "ㄍㄥ ㄒㄧㄣ"}, {"難", "ㄋㄢˊ"}, {"南", "ㄋㄢˊ"}, {"用", "ㄩㄥˋ"}, {"越南", "ㄩㄝˋ ㄋㄢˊ"}, {"更", "ㄍㄥ"},
+            {"新", "ㄒㄧㄣ"}, {"中", "ㄓㄨㄥ"}, {"鐘", "ㄓㄨㄥ"}, {"文", "ㄨㄣˊ"}, {"聞", "ㄨㄣˊ"}, {"中文", "ㄓㄨㄥ ㄨㄣˊ"}};
+}
+
+WordId wordId(const LanguageModel& lm, std::string_view text) {
+    const auto& words = lm.words();
+    for (std::size_t i = 0; i < words.size(); ++i) {
+        if (words[i] == text) return static_cast<WordId>(i);
+    }
+    throw std::runtime_error("迷你模型裡沒有這個詞");
+}
+
+std::wstring environment(const wchar_t* name) {
+    wchar_t buffer[MAX_PATH] = {};
+    const DWORD n = GetEnvironmentVariableW(name, buffer, MAX_PATH);
+    return n > 0 && n < MAX_PATH ? std::wstring(buffer, n) : std::wstring();
+}
+
+}  // namespace
+
+/// ParallelProgramsKeepEveryPick 啟動的子程序：用自己的「前一個詞」，把每個詞各學 kChildRounds 次。
+TEST(SharedUserModelChild, DISABLED_LearnEveryPick) {
+    const std::wstring file = environment(kChildFileVariable);
+    const std::wstring index = environment(kChildIndexVariable);
+    if (file.empty() || index.empty()) GTEST_SKIP() << "只在 ParallelProgramsKeepEveryPick 裡執行";
+    const auto lm = makeLM();
+    UserModel memory(lm, std::filesystem::path(file));
+    const WordId prev = wordId(*lm, kChildPrevWords[std::stoi(index)]);
+    for (int round = 0; round < kChildRounds; ++round) {
+        for (const auto& [word, reading] : everyPick()) {
+            memory.learn(prev, wordId(*lm, word), ReadingKey::of(*Syllable::parseReading(reading)));
+        }
+    }
+    for (int attempt = 0; attempt < 50 && !memory.flush(); ++attempt) Sleep(20);
+    EXPECT_EQ(memory.unsavedChanges(), 0u);
+}
+
+/// 四個程式同時大量學習：每一筆都留在記憶檔裡，次數也正確累加，檔案沒有壞掉。
+TEST(SharedUserModelTests, ParallelProgramsKeepEveryPick) {
+    TempDir dir("bangbang-parallel");
+    const auto path = dir.path / "user-model.json";
+    wchar_t exe[MAX_PATH] = {};
+    ASSERT_GT(GetModuleFileNameW(nullptr, exe, MAX_PATH), 0u);
+    std::vector<PROCESS_INFORMATION> children;
+    SetEnvironmentVariableW(kChildFileVariable, path.c_str());
+    for (int i = 0; i < kChildPrograms; ++i) {
+        SetEnvironmentVariableW(kChildIndexVariable, std::to_wstring(i).c_str());
+        std::wstring command = L"\"" + std::wstring(exe) +
+                               L"\" --gtest_also_run_disabled_tests --gtest_filter=SharedUserModelChild.DISABLED_LearnEveryPick";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+            children.push_back(process);
+        } else {
+            ADD_FAILURE() << "無法啟動子程序，錯誤 " << GetLastError();
+        }
+    }
+    SetEnvironmentVariableW(kChildFileVariable, nullptr);
+    SetEnvironmentVariableW(kChildIndexVariable, nullptr);
+    for (const auto& process : children) {
+        EXPECT_EQ(WaitForSingleObject(process.hProcess, 120000), WAIT_OBJECT_0);
+        DWORD code = 1;
+        GetExitCodeProcess(process.hProcess, &code);
+        EXPECT_EQ(code, 0u) << "子程序的測試失敗";
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    ASSERT_EQ(children.size(), static_cast<std::size_t>(kChildPrograms));
+
+    const auto root = readJson(path);
+    const auto picks = everyPick();
+    const auto& contextual = root.at("contextual");
+    EXPECT_EQ(contextual.size(), kChildPrograms * picks.size());
+    for (const char* prev : kChildPrevWords) {
+        for (const auto& [word, reading] : picks) {
+            const std::string key = std::string(prev) + "\t" + word + "\t" + reading;
+            ASSERT_TRUE(contextual.contains(key)) << key;
+            EXPECT_EQ(contextual.at(key).at("count"), kChildRounds) << key;
+        }
+    }
+    for (const auto& [word, reading] : picks) {
+        EXPECT_EQ(root.at("unigram").at(word + "\t" + reading).at("count"), std::min(kChildPrograms * kChildRounds, UserModel::kMaxCount));
+    }
+}
+
+// MARK: - 共用檔案的基本操作
+
+/// 別的程式正在讀舊檔時也能取代：讀的人讀完舊的內容，之後再開就是新的。
+TEST(SharedFileTests, ReplaceWhileAnotherProgramReads) {
+    TempDir dir("bangbang-file");
+    const auto path = dir.path / "data.json";
+    ASSERT_TRUE(replaceSharedFile(path, "old content"));
+    const HANDLE reader = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                      OPEN_EXISTING, 0, nullptr);
+    ASSERT_NE(reader, INVALID_HANDLE_VALUE);
+    EXPECT_TRUE(replaceSharedFile(path, "new content"));
+    char buffer[32] = {};
+    DWORD n = 0;
+    EXPECT_TRUE(ReadFile(reader, buffer, sizeof(buffer), &n, nullptr));
+    EXPECT_EQ(std::string(buffer, n), "old content");
+    CloseHandle(reader);
+    EXPECT_EQ(readFile(path), "new content");
+}
+
+/// 每次取代都是新的版本，就算內容、大小完全一樣（修改時間的精確度不夠也不怕）。
+TEST(SharedFileTests, EveryReplaceIsANewVersion) {
+    TempDir dir("bangbang-file");
+    const auto path = dir.path / "data.json";
+    EXPECT_EQ(fileStamp(path), FileStamp{});
+    const auto first = replaceSharedFile(path, "same");
+    const auto second = replaceSharedFile(path, "same");
+    ASSERT_TRUE(first && second);
+    EXPECT_TRUE(first->exists);
+    EXPECT_NE(*first, *second);
+    EXPECT_EQ(fileStamp(path), second);
+    std::string data;
+    FileStamp stamp;
+    EXPECT_EQ(readSharedFile(path, data, stamp), ReadResult::Ok);
+    EXPECT_EQ(data, "same");
+    EXPECT_EQ(stamp, *second);
+    EXPECT_EQ(readSharedFile(dir.path / "missing.json", data, stamp), ReadResult::Missing);
+}
+
+TEST(SharedFileTests, LockIsExclusive) {
+    using namespace std::chrono_literals;
+    TempDir dir("bangbang-file");
+    const auto lockPath = dir.path / "data.lock";
+    {
+        const auto first = FileLock::acquire(lockPath, 0ms);
+        ASSERT_TRUE(first);
+        EXPECT_FALSE(FileLock::acquire(lockPath, 30ms));
+    }
+    EXPECT_TRUE(FileLock::acquire(lockPath, 0ms)) << "解構時解鎖";
+}
+
+TEST(SharedFileTests, FolderIsCreatedAndChecked) {
+    TempDir dir("bangbang-file");
+    const auto folder = dir.path / "BangbangZhuyin";
+    EXPECT_EQ(checkSharedFolder(folder, false), FolderState::Missing);
+    EXPECT_EQ(checkSharedFolder(folder, true), FolderState::Ready);
+    EXPECT_TRUE(std::filesystem::is_directory(folder));
+    EXPECT_EQ(checkSharedFolder(folder, false), FolderState::Ready);
+    writeFile(dir.path / "not-a-folder", "x");
+    EXPECT_EQ(checkSharedFolder(dir.path / "not-a-folder", true), FolderState::Failed);
 }
 
 TEST(UserModelFileTests, MissingFileStartsEmpty) {

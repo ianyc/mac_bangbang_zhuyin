@@ -5,6 +5,8 @@
 // - 在宿主程式的 UI 執行緒建立，沿用該執行緒的 DPI 設定（不更改宿主的 DPI 設定）：
 //   視窗座標和 ITfContextView::GetTextExt 回傳的座標是同一套，依視窗實際的 DPI 放大。
 // - Windows 11 圓角；跟隨系統的淺色／深色與強調色；顯示、隱藏、內容改變時送出 EVENT_OBJECT_IME_*。
+// - Direct2D 軟體繪製：不必在每個程式裡初始化顯示卡（第一次要將近 0.2 秒）。顯示時同步畫好；
+//   從隱藏變成顯示時先 cloak、畫好再現身，第一次選字也不會先看到空白的視窗。
 
 #include <windows.h>
 #include <d2d1.h>
@@ -43,6 +45,9 @@ public:
 
 private:
     bool ensureWindow(HWND owner);
+    bool createTarget();
+    /// 讓 DWM 暫時不顯示這個視窗（視窗仍然算是顯示中，可以照常畫）。
+    void cloak(bool hidden);
     void place();
     void paint();
     UINT dpiFor(const RECT& anchor) const;

@@ -276,6 +276,11 @@ STDMETHODIMP TextService::Deactivate() {
         debugLog(L"棒棒注音：停用（client %lu）", static_cast<unsigned long>(clientId_));
         // 切換到別的輸入法時，送出整個組字區。
         commitComposition();
+        // 之前等不到鎖、還留在記憶體的選字記憶，趁現在寫進記憶檔（程式可能接著就關掉了）。
+        if (engine_ && engine_->userModel) {
+            std::lock_guard lock(engine_->mutex);
+            if (engine_->userModel->unsavedChanges() > 0) engine_->userModel->flush();
+        }
         closeCandidateUI();
         candidateWindow_.reset();
         if (candidateUI_) {
@@ -457,6 +462,8 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* context, WPARAM wParam, LPARAM l
         SessionOutput output;
         {
             std::lock_guard lock(engine_->mutex);
+            // 開始組字前，載入別的程式學到的選字（記憶檔沒變時只查一次檔案資訊）。
+            if (!session_->isComposing() && engine_->userModel) engine_->userModel->refresh();
             output = session_->handle(decision.key);
         }
         *eaten = output.handled ? TRUE : FALSE;

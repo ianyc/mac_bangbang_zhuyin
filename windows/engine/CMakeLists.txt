@@ -6,6 +6,7 @@ add_library(bangbang_engine STATIC
     Composition.h Composition.cpp
     InputSession.h InputSession.cpp
     Punctuation.h Punctuation.cpp
+    SharedFile.h SharedFile.cpp
     UserModel.h UserModel.cpp
     Utf8.h Utf8.cpp)
 target_include_directories(bangbang_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")

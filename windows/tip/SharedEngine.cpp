@@ -36,7 +36,8 @@ std::optional<std::filesystem::path> userModelPath(bool secureMode) {
     const DWORD n = GetEnvironmentVariableW(L"BANGBANG_USER_MODEL", buffer, MAX_PATH);
     if (n > 0 && n < MAX_PATH) return std::filesystem::path(buffer);
     if (n == 0 && GetLastError() != ERROR_ENVVAR_NOT_FOUND) return std::nullopt;  // 設成空字串：不讀寫檔案
-    // 沙盒讀不到使用者的記憶檔，寫入也只會寫到該程式自己的資料夾：先只記在記憶體裡（第 6 階段再設計共用方式）。
+    // 沙盒（Microsoft Store 程式、開始功能表搜尋等）讀不到使用者的記憶檔：只記在記憶體裡，程式關掉就忘。
+    // 不開放權限給沙盒：記憶檔裡是使用者打過的詞，開放後所有 Store 程式都讀得到（第 6 階段決定）。
     if (isAppContainerProcess()) {
         debugLog(L"棒棒注音：在沙盒程式裡執行，選字記憶只放在記憶體");
         return std::nullopt;

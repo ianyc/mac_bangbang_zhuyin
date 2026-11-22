@@ -2,7 +2,13 @@
 // 模型檔不在 git 裡；找不到時這些測試會略過。
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+
+#include <nlohmann/json.hpp>
 
 #include "InputSession.h"
 #include "LanguageModel.h"
@@ -139,4 +145,107 @@ TEST(RealModelTests, MemoryFollowsLatestTie) {
     pickNumber(session, indexOf(session.candidateList()->items, "你"));
     EXPECT_EQ(session.handle(key(T::Enter)).commit, "我愛你");
     EXPECT_EQ(typeAndShow(session, "ji394su3"), "我愛你");
+}
+
+/// 同上，但在兩個程式之間（第 6 階段的完成標準）：A 在「我愛」後選「妳」，B 下次打就是「妳」；B 再選「你」，A 也變回「你」。
+TEST(RealModelTests, MemoryIsSharedBetweenPrograms) {
+    REQUIRE_MODEL();
+    TempDir dir("bangbang-real-shared");
+    const auto path = dir.path / "user-model.json";
+    UserModel a(lm, path), b(lm, path);
+    InputSession sa(lm, &a), sb(lm, &b);
+    ASSERT_EQ(typeAndShow(sa, "ji394su3"), "我愛你");
+    sa.handle(key(T::Down));
+    pickNumber(sa, indexOf(sa.candidateList()->items, "妳"));
+    EXPECT_EQ(sa.handle(key(T::Enter)).commit, "我愛妳");
+    EXPECT_TRUE(b.refresh());
+    EXPECT_EQ(typeAndShow(sb, "ji394su3"), "我愛妳");
+    sb.handle(key(T::Down));
+    pickNumber(sb, indexOf(sb.candidateList()->items, "你"));
+    EXPECT_EQ(sb.handle(key(T::Enter)).commit, "我愛你");
+    EXPECT_TRUE(a.refresh());
+    EXPECT_EQ(typeAndShow(sa, "ji394su3"), "我愛你");
+}
+
+/// 量大型記憶檔的讀寫時間（每個程式載入、學習、重新載入各花多久）。手動執行：
+/// bangbang_tests --gtest_also_run_disabled_tests --gtest_filter=*LargeMemoryTiming*
+TEST(RealModelTests, DISABLED_LargeMemoryTiming) {
+    REQUIRE_MODEL();
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    TempDir dir("bangbang-large-memory");
+    const auto path = dir.path / "user-model.json";
+    // 用詞表裡真的詞與讀音湊出 2 萬筆上下文記錄（約是天天大量手動選字好幾年的份量）。
+    // 環境變數 BANGBANG_TIMING_RECORDS 可以改筆數。
+    std::size_t records = 20000;
+    char value[16] = {};
+    if (GetEnvironmentVariableA("BANGBANG_TIMING_RECORDS", value, sizeof(value)) > 0) records = std::strtoul(value, nullptr, 10);
+    nlohmann::json root = {{"version", 2}, {"contextual", nlohmann::json::object()}, {"unigram", nlohmann::json::object()}};
+    const char* const prevs[] = {"<s>", "我", "的", "是", "在"};
+    std::size_t n = 0;
+    for (const auto& [key, entries] : lm->lexicon()) {
+        if (n >= records) break;
+        std::string reading;
+        for (const auto& s : key.syllables()) reading += (reading.empty() ? "" : " ") + s.description();
+        const std::string word(lm->words()[entries.front().word]);
+        const nlohmann::json record = {{"count", 1}, {"lastUsed", 1.7e9 + static_cast<double>(n)}};
+        root["contextual"][std::string(prevs[n % 5]) + "\t" + word + "\t" + reading] = record;
+        root["unigram"][word + "\t" + reading] = record;
+        ++n;
+    }
+    const std::string text = root.dump(2);
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << text;
+    }
+    std::printf("記憶檔：%zu 筆，%.1f KB\n", n, static_cast<double>(text.size()) / 1024);
+
+    auto start = Clock::now();
+    EXPECT_TRUE(nlohmann::json::accept(text));
+    std::printf("（對照）只檢查 JSON 語法：%.1f ms\n", ms(Clock::now() - start));
+    start = Clock::now();
+    std::size_t scanned = 0;
+    for (std::size_t i = 0; i < lm->words().size(); ++i) scanned += lm->words()[i].size();
+    std::printf("（對照）掃一次詞表：%.1f ms（%zu 字節）\n", ms(Clock::now() - start), scanned);
+
+    start = Clock::now();
+    UserModel a(lm, path);
+    std::printf("載入：%.1f ms\n", ms(Clock::now() - start));
+    UserModel b(lm, path);
+    InputSession sa(lm, &a);
+
+    start = Clock::now();
+    ASSERT_EQ(typeAndShow(sa, "ji394su3"), "我愛你");
+    sa.handle(key(T::Down));
+    pickNumber(sa, indexOf(sa.candidateList()->items, "妳"));
+    std::printf("學習（檔案沒被別人改過）：%.1f ms\n", ms(Clock::now() - start));
+    sa.handle(key(T::Enter));
+
+    start = Clock::now();
+    EXPECT_FALSE(a.refresh());
+    std::printf("組字前檢查（沒變）：%.3f ms\n", ms(Clock::now() - start));
+
+    start = Clock::now();
+    EXPECT_TRUE(b.refresh());
+    std::printf("組字前檢查（別人改過，重新載入）：%.1f ms\n", ms(Clock::now() - start));
+
+    InputSession sb(lm, &b);
+    ASSERT_EQ(typeAndShow(sb, "ji394su3"), "我愛妳");
+    sb.handle(key(T::Down));
+    pickNumber(sb, indexOf(sb.candidateList()->items, "你"));
+    sb.handle(key(T::Enter));
+    start = Clock::now();
+    EXPECT_TRUE(a.refresh());
+    ASSERT_EQ(typeAndShow(sa, "ji394su3"), "我愛你");
+    std::printf("（對照）別的程式改過之後，重新載入再打 8 個鍵：%.1f ms\n", ms(Clock::now() - start));
+    sa.handle(key(T::Enter));
+
+    UserModel c(lm, path);
+    InputSession sc(lm, &c);
+    b.learn(0, 1, ReadingKey::of(*Syllable::parseReading("ㄧ")));  // 讓 c 手上的版本過期
+    start = Clock::now();
+    ASSERT_EQ(typeAndShow(sc, "ji394su3"), "我愛你");
+    sc.handle(key(T::Down));
+    pickNumber(sc, indexOf(sc.candidateList()->items, "妳"));
+    std::printf("學習（檔案被別人改過，先重新載入再寫）：%.1f ms\n", ms(Clock::now() - start));
 }

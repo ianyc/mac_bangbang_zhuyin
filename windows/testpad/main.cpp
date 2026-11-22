@@ -13,13 +13,17 @@
 #include <ctffunc.h>
 #include <msctf.h>
 #include <richedit.h>
+#include <dwmapi.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cwchar>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -30,9 +34,23 @@
 #include "CandidateRenderer.h"
 #include "CandidateWindow.h"
 #include "Guids.h"
+#include "Globals.h"
 #include "InputSession.h"
 #include "LanguageModel.h"
+#include "UserModel.h"
 #include "Utf8.h"
+
+// 和輸入法 DLL 共用的 CandidateWindow.cpp 需要這兩個（DLL 裡在 Globals.cpp）。
+namespace bangbang {
+HINSTANCE g_module = GetModuleHandleW(nullptr);
+void debugLog(const wchar_t* format, ...) {
+    va_list args;
+    va_start(args, format);
+    std::vfwprintf(stderr, format, args);
+    va_end(args);
+    std::fputwc(L'\n', stderr);
+}
+}  // namespace bangbang
 
 using Microsoft::WRL::ComPtr;
 using namespace bangbang;
@@ -699,6 +717,21 @@ std::vector<TestCase> testCases() {
     };
 }
 
+/// 不經過輸入法、直接用引擎打字，並在候選窗選 word 後送出（扮演「別的程式」學習）。
+bool pickWithEngine(InputSession& session, std::string_view keys, const std::string& word) {
+    for (const auto& key : parseKeys(keys)) {
+        if (key.check.empty()) session.handle(key.event);
+    }
+    session.handle(KeyEvent::of(KeyEvent::Type::Down));
+    const auto& list = session.candidateList();
+    if (!list) return false;
+    const auto it = std::find_if(list->items.begin(), list->items.end(), [&](const Candidate& c) { return c.text == word; });
+    if (it == list->items.end()) return false;
+    session.chooseCandidate(static_cast<int>(it - list->items.begin()));
+    session.handle(KeyEvent::of(KeyEvent::Type::Enter));
+    return true;
+}
+
 // 只測 RichEdit（直接使用 TSF）。一般的 EDIT 控制項走 IMM32 相容層，按鍵不經過 ITfKeystrokeMgr，
 // 要模擬只能送真的鍵盤輸入（SendInput），會打進當時在前景的任何視窗，所以那條路徑用手動測試。
 int runSelfTest(const std::filesystem::path& modelPath) {
@@ -710,8 +743,13 @@ int runSelfTest(const std::filesystem::path& modelPath) {
         std::printf("無法讀取模型（標準答案用）：%s\n", e.what());
         return 2;
     }
-    // 讓輸入法只把選字記憶放在記憶體裡，不讀寫使用者的記憶檔。
-    SetEnvironmentVariableW(L"BANGBANG_USER_MODEL", L"");
+    // 輸入法的選字記憶改用暫存的記憶檔，不碰使用者的記憶檔；測完刪掉。最後兩題用它測跨程式共用。
+    const std::filesystem::path memoryFolder =
+        std::filesystem::temp_directory_path() / (L"bangbang-testpad-" + std::to_wstring(GetCurrentProcessId()));
+    std::error_code memoryError;
+    std::filesystem::create_directories(memoryFolder, memoryError);
+    const std::filesystem::path memoryFile = memoryFolder / L"user-model.json";
+    SetEnvironmentVariableW(L"BANGBANG_USER_MODEL", memoryFile.c_str());
 
     HWND window = createTestWindow();
     const HWND target = g_richEdit;
@@ -832,6 +870,83 @@ int runSelfTest(const std::filesystem::path& modelPath) {
         }
         std::fflush(stdout);
     }
+
+    // 選字記憶跨程式共用（第 6 階段）：testpad 用自己的另一份引擎扮演「別的程式」，和輸入法讀寫同一個記憶檔。
+    {
+        UserModel other(lm, memoryFile);
+        const auto report = [&](const char* name, const std::string& problems, const std::string& actual) {
+            if (problems.empty()) {
+                ++passed;
+                std::printf("✓ %s：「%s」\n", name, actual.c_str());
+            } else if (GetForegroundWindow() != window) {
+                ++skipped;
+                std::printf("－ %s：測試中視窗失去前景（可能點了別的視窗），不算失敗\n", name);
+            } else {
+                ++failed;
+                std::printf("✗ %s\n%s", name, problems.c_str());
+            }
+            std::fflush(stdout);
+        };
+        const auto typeWithIme = [&](const std::string& keys) {
+            for (const auto& key : parseKeys(keys)) {
+                if (key.check.empty()) sendKey(keystrokes.Get(), key);
+            }
+        };
+        const auto ready = [&](const char* name) {
+            SetWindowTextW(target, L"");
+            if (ensureForeground(window, target)) {
+                TestRun run = base;
+                forceChinese(run);
+                return true;
+            }
+            ++skipped;
+            std::printf("－ %s：測試視窗不在前景（可能點了別的視窗），略過\n", name);
+            return false;
+        };
+
+        const char* first = "記憶：別的程式在「我愛」後選「妳」，這裡下次打就是「妳」";
+        InputSession elsewhere(lm, &other);
+        const bool pickedThere = pickWithEngine(elsewhere, "ji394su3", "妳");
+        if (ready(first)) {
+            typeWithIme("ji394su3<enter>");
+            const std::string actual = windowText(target);
+            std::string problems;
+            if (!pickedThere) problems += "  （測試錯誤）別的程式的候選窗裡沒有「妳」\n";
+            if (actual != "我愛妳") problems += "  文件內容：「" + actual + "」，應為「我愛妳」\n";
+            report(first, problems, actual);
+        }
+
+        const char* second = "記憶：這裡改選「你」，別的程式也跟著變回「你」";
+        if (ready(second)) {
+            // 用和輸入法一樣的記憶算出「你」在候選窗的第幾個（只看、不選，不會學習）。
+            std::string keys;
+            {
+                InputSession oracle(lm, &other);
+                for (const auto& key : parseKeys("ji394su3<down>")) oracle.handle(key.event);
+                const auto& list = oracle.candidateList();
+                if (list) {
+                    const auto it = std::find_if(list->items.begin(), list->items.end(), [](const Candidate& c) { return c.text == "你"; });
+                    const auto index = it - list->items.begin();
+                    if (it != list->items.end() && index < list->perPage) keys = "ji394su3<down>" + std::to_string(index + 1) + "<enter>";
+                }
+            }
+            std::string problems;
+            std::string actual;
+            if (keys.empty()) {
+                problems += "  （測試錯誤）候選窗第一頁沒有「你」\n";
+            } else {
+                typeWithIme(keys);
+                actual = windowText(target);
+                if (actual != "我愛你") problems += "  文件內容：「" + actual + "」，應為「我愛你」\n";
+                if (!other.refresh()) problems += "  別的程式沒有發現記憶檔被輸入法改過\n";
+                InputSession check(lm, &other);
+                for (const auto& key : parseKeys("ji394su3")) check.handle(key.event);
+                if (check.markedText() != "我愛你") problems += "  別的程式打出「" + check.markedText() + "」，應為「我愛你」\n";
+            }
+            report(second, problems, actual);
+        }
+    }
+
     if (skipped > 0) {
         std::printf("通過 %d 項，失敗 %d 項，略過 %d 項（測試時請不要點別的視窗）\n", passed, failed, skipped);
     } else {
@@ -850,6 +965,7 @@ int runSelfTest(const std::filesystem::path& modelPath) {
     if (source && sinkCookie != TF_INVALID_COOKIE) source->UnadviseSink(sinkCookie);
     DestroyWindow(window);
     pumpMessages();
+    std::filesystem::remove_all(memoryFolder, memoryError);
     if (failed > 0) return 1;
     return skipped > 0 ? 3 : 0;
 }
@@ -1026,6 +1142,132 @@ int renderCandidates(const std::filesystem::path& folder) {
     return 0;
 }
 
+// MARK: - 候選窗的顯示時間
+
+/// 從螢幕擷取視窗所在的範圍（含 DWM 畫的圓角），存成 PNG：看輸入法真正的候選窗在螢幕上長什麼樣子。
+HRESULT captureWindow(HWND hwnd, const std::filesystem::path& path) {
+    DwmFlush();  // 等 DWM 把視窗畫上螢幕
+    DwmFlush();
+    RECT rect{};
+    GetWindowRect(hwnd, &rect);
+    InflateRect(&rect, 6, 6);
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    ComPtr<IWICImagingFactory> wic;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+    if (FAILED(hr)) return hr;
+    const HDC screen = GetDC(nullptr);
+    const HDC memory = CreateCompatibleDC(screen);
+    const HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
+    const HGDIOBJ old = SelectObject(memory, bitmap);
+    BitBlt(memory, 0, 0, width, height, screen, rect.left, rect.top, SRCCOPY | CAPTUREBLT);
+    SelectObject(memory, old);
+    ComPtr<IWICBitmap> source;
+    hr = wic->CreateBitmapFromHBITMAP(bitmap, nullptr, WICBitmapIgnoreAlpha, &source);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    ComPtr<IWICStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    if (SUCCEEDED(hr)) hr = wic->CreateStream(&stream);
+    if (SUCCEEDED(hr)) hr = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
+    if (SUCCEEDED(hr)) hr = wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (SUCCEEDED(hr)) hr = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+    if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, nullptr);
+    if (SUCCEEDED(hr)) hr = frame->Initialize(nullptr);
+    if (SUCCEEDED(hr)) hr = frame->SetSize(static_cast<UINT>(width), static_cast<UINT>(height));
+    WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&format);
+    if (SUCCEEDED(hr)) hr = frame->WriteSource(source.Get(), nullptr);
+    if (SUCCEEDED(hr)) hr = frame->Commit();
+    if (SUCCEEDED(hr)) hr = encoder->Commit();
+    return hr;
+}
+
+/// --time-candidates steps [software]：把候選窗第一次顯示拆成各步驟量時間（自己照輸入法的步驟做一次）。
+/// --time-candidates window [capture <PNG 檔>]：用輸入法真正的 CandidateWindow，量第一次與第二次從顯示到畫好的時間；
+/// 加上 capture 時把螢幕上的候選窗存成圖片。
+/// 每次都要在新的程序裡執行，量到的才是「新開的程式第一次選字」。
+int timeCandidates(const std::wstring& mode, bool software, const std::filesystem::path& capture) {
+    using Clock = std::chrono::steady_clock;
+    auto last = Clock::now();
+    const auto lap = [&](const char* what) {
+        const auto now = Clock::now();
+        std::printf("  %-34s %7.1f ms\n", what, std::chrono::duration<double, std::milli>(now - last).count());
+        std::fflush(stdout);
+        last = now;
+    };
+    CandidatePage page{{L"中文", L"中聞", L"終聞", L"鐘文", L"忠", L"中", L"鐘", L"終", L"忠文"}, 0, 0, 3};
+    const RECT anchor{300, 300, 360, 330};
+
+    if (mode == L"window") {
+        std::printf("輸入法的候選窗（%ls）：\n", kArch);
+        CandidateWindow window;
+        last = Clock::now();
+        window.show(page, anchor, nullptr);
+        lap("第一次 show()");
+        UpdateWindow(window.hwnd());
+        lap("第一次畫好（WM_PAINT）");
+        window.hide();
+        page.highlighted = 1;
+        last = Clock::now();
+        window.show(page, anchor, nullptr);
+        lap("第二次 show()");
+        UpdateWindow(window.hwnd());
+        lap("第二次畫好（WM_PAINT）");
+        if (!capture.empty()) {
+            const HRESULT hr = captureWindow(window.hwnd(), capture);
+            std::printf(SUCCEEDED(hr) ? "已擷取候選窗：%ls\n" : "無法擷取候選窗：%ls\n", capture.c_str());
+        }
+        return 0;
+    }
+
+    std::printf("候選窗第一次顯示的各步驟（%ls，%s）：\n", kArch, software ? "軟體繪製" : "顯示卡繪製");
+    LoadLibraryW(L"dwrite.dll");
+    lap("載入 dwrite.dll");
+    LoadLibraryW(L"d2d1.dll");
+    lap("載入 d2d1.dll");
+    CandidateRenderer renderer;
+    if (FAILED(renderer.initialize())) return 2;
+    lap("DirectWrite 字型格式");
+    const D2D1_SIZE_F size = renderer.measure(page);
+    lap("第一次排版（量大小）");
+    renderer.measure(page);
+    lap("（對照）第二次排版");
+    ComPtr<ID2D1Factory> d2d;
+    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d.GetAddressOf()))) return 2;
+    lap("Direct2D factory");
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"BangbangTimingWindow";
+    RegisterClassExW(&wc);
+    const HWND hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName, L"", WS_POPUP, 0, 0, 0, 0,
+                                      nullptr, nullptr, wc.hInstance, nullptr);
+    lap("建立視窗");
+    const UINT dpi = GetDpiForWindow(hwnd);
+    const int width = static_cast<int>(std::ceil(size.width * dpi / 96.0f));
+    const int height = static_cast<int>(std::ceil(size.height * dpi / 96.0f));
+    SetWindowPos(hwnd, HWND_TOPMOST, anchor.left, anchor.bottom, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    lap("顯示視窗");
+    ComPtr<ID2D1HwndRenderTarget> target;
+    const auto properties = D2D1::RenderTargetProperties(software ? D2D1_RENDER_TARGET_TYPE_SOFTWARE : D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                                                         D2D1::PixelFormat(), static_cast<float>(dpi), static_cast<float>(dpi));
+    if (FAILED(d2d->CreateHwndRenderTarget(properties, D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(width, height)), &target))) return 2;
+    lap("建立繪圖目標");
+    const CandidateTheme theme = CandidateTheme::current();
+    for (const char* what : {"第一次畫", "第二次畫"}) {
+        target->BeginDraw();
+        renderer.draw(target.Get(), page, theme);
+        target->EndDraw();
+        lap(what);
+    }
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1048,6 +1290,14 @@ int wmain(int argc, wchar_t** argv) {
             const int argument = i + 1 < argc ? _wtoi(argv[i + 1]) : 0;
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             const int code = probeGlobal(action, argument);
+            CoUninitialize();
+            return code;
+        } else if (arg == L"--time-candidates") {
+            const std::wstring mode = i + 1 < argc ? argv[i + 1] : L"steps";
+            const std::wstring option = i + 2 < argc ? argv[i + 2] : L"";
+            const std::filesystem::path capture = option == L"capture" && i + 3 < argc ? argv[i + 3] : L"";
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            const int code = timeCandidates(mode, option == L"software", capture);
             CoUninitialize();
             return code;
         } else if (arg == L"--lm" && i + 1 < argc) {

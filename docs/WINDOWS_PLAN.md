@@ -15,7 +15,7 @@
 | 3 | 最小 TSF 輸入法（記事本能打字） | 完成（2026-11-21 驗收）：DLL、註冊腳本、testpad 完成；TSF 自動測試 x64／x86 各 20 項通過；記事本、設定、開始功能表搜尋、Claude、Chrome 都能用。開發版改部署到 `windows\out\deploy`（見實作紀錄的 MSIX 轉存問題） |
 | 4 | 候選窗 | 完成（2026-11-22 驗收）：候選窗、位置、UI-less 完成；單元測試 x64／x86 各 60 項通過；testpad x64／x86 各 30 項通過（含 9 項候選與 UI-less）；記事本、Chrome、Claude 手動測試通過 |
 | 5 | 中英切換（單按 Shift）＋工作列圖示 | 完成（2026-11-22 驗收）：所有程式共用中英狀態、單按 Shift、工作列「中／英」完成；單元測試 x64／x86 各 65 項通過；testpad x64／x86 各 39 項通過；使用者手動測試通過 |
-| 6 | 選字記憶存檔（多程序）＋程式相容性 | |
+| 6 | 選字記憶存檔（多程序）＋程式相容性 | 完成（2026-11-22 驗收）：多程式共用記憶檔（鎖檔、合併、組字前重新載入、處理 MSIX 轉存）完成；單元測試 x64／x86 各 79 項通過（含四個程序同時學習）；testpad x64／x86 各 41 項通過（含 2 項跨程式記憶）；使用者手動測試通過；新程式第一次選字時候選窗先空白的延遲已修正（改用軟體繪製） |
 | 7 | 安裝、解除安裝與更新 | |
 
 ---
@@ -112,16 +112,35 @@ windows/
 
 ### 2.4 選字記憶的儲存（多程序）
 
-- **位置**：`%APPDATA%\BangbangZhuyin\user-model.json`，對應 Mac 的 `~/Library/Application Support/BangbangZhuyin/`。
+- **位置**：`%APPDATA%\BangbangZhuyin\user-model.json`，對應 Mac 的 `~/Library/Application Support/BangbangZhuyin/`。格式與 Mac 版相同（JSON 第 2 版），兩邊可以直接互相複製；Windows 版寫出時一筆記錄一行（檔案小一半）。
 - **多程序同時使用**：每個程式都會載入同一個 DLL、各有一份引擎狀態，可能同時寫入記憶檔。
-  - 寫入：鎖檔（`LockFileEx`）→ 重新讀檔並合併 → 寫暫存檔 → 取代原檔 → 解鎖。不會互相覆蓋，也不會寫壞。
-  - 讀取：開始組字前檢查檔案的修改時間，被別的程式更新過就重新載入。A 程式學到的，B 程式下一次打字就用得到。
-  - 載入要輕：每個程式都會載入一次記憶，所以不建整份詞表的文字索引。
-- **封裝程式（MSIX）的 AppData 虛擬化**（2026-11-21 發現並實測確認）：Claude、Windows 11 記事本都是封裝成 MSIX 的完整信任程式。這類程式（和它們開出來的子程式）在 AppData 新建的檔案，會轉存到 `%LOCALAPPDATA%\Packages\<程式>\LocalCache` 底下的私有位置，其他程式看不到；第 3 階段的開發版部署就是因此只有 Claude 看得到（見第 3 階段的實作紀錄）。所以在這些程式裡學到的選字，寫不進共用的記憶檔，記憶會分散在各程式的私有資料夾。可能的做法：記憶檔改放在不受虛擬化影響的位置（例如不在 AppData 的使用者資料夾），或交給一個不在封裝環境裡的小程式（例如 out-of-proc COM 伺服器）代寫。
-- **Microsoft Store 程式（AppContainer）**：
+  - 寫入（學習時）：
+    - 鎖住旁邊的 `user-model.json.lock`（`LockFileEx`，最多等 0.2 秒）。
+    - 檔案在上次讀取後被別的程式改過，就先重新載入，再把這次的選字套上去。次數以檔案裡的為準再加一，所以兩個程式各選一次就是 2 次。
+    - 寫暫存檔並寫進磁碟，再用 POSIX 式取代原檔：讀的人繼續讀到舊檔，不會擋住寫入。然後解鎖。
+    - 等不到鎖時，變更先留在記憶體，下次學習或輸入法停用時再寫。
+  - 讀取：
+    - 開始組字前比對檔案版本（檔案編號＋修改時間＋大小）。每次取代都是新檔案，編號一定不同，不怕修改時間的精確度不夠。
+    - 被別的程式改過就重新載入，還沒寫進去的變更會重做一次。
+    - 不需要鎖：讀到的一定是完整的某一版。
+  - 刪掉記憶檔，或某個程式清除記憶時，其他程式下次組字也跟著忘掉。壞掉的記憶檔在下次學習時改名成 `.corrupt` 保留，再寫入新的。
+  - 載入要輕：每個程式都會載入一次記憶，所以不建整份詞表的文字索引，JSON 也用串流方式解析。實測（Release，2026-11-22）：
+    - 2 千筆（約 390 KB）：載入 11 ms、學習 4 ms、別人改過後重新載入 15 ms。
+    - 2 萬筆（約 4 MB，重度使用好幾年的份量）：分別是 65、13、74 ms。
+    - 檔案沒變時，組字前的檢查約 0.05 ms。
+- **封裝程式（MSIX）的 AppData 虛擬化**（2026-11-21 發現，2026-11-22 實測出規則）：
+  - 只有封裝程式**新建的資料夾**會被轉存到 `%LOCALAPPDATA%\Packages\<程式>\LocalCache` 底下的私有位置，其他程式看不到。第 3 階段的開發版部署就是因此只有 Claude 看得到。
+  - 資料夾已經在真正的 AppData 裡時，裡面的新檔、改寫、暫存檔取代（`MoveFileEx`、`ReplaceFile`）都寫到真正的位置。在 Windows Terminal 與 Claude 的封裝環境（`Invoke-CommandInDesktopPackage`）裡逐一實測過。
+  - 從封裝程式開出來的子程式（例如從 Claude 開的程式）沒有封裝身分，卻一樣會被轉存，所以不能靠封裝身分判斷。
+  - 記事本、小畫家、剪取工具、新版 Outlook 的套件關掉了檔案虛擬化；Windows Terminal、Claude、Teams、相片、Office 中心沒有關。
+  - 做法：
+    - 記憶檔的資料夾不存在時，輸入法建立它，再用 `GetFinalPathNameByHandle` 查實際位置；被轉存時會顯示 `…\Packages\<程式>\LocalCache\…`。
+    - 被轉存就馬上刪掉，這次的學習先留在記憶體。
+    - 等不在封裝環境裡的程式（檔案總管、Chrome、Edge、VS Code…）建立真正的資料夾之後，就寫得進去。
+- **Microsoft Store 程式（AppContainer，例如開始功能表搜尋、計算機）**：
   - 模型放在 Program Files，預設就讀得到。
-  - 記憶檔在使用者資料夾，沙盒裡可能讀寫不到，所以讀寫失敗一律安靜略過，不能當掉。
-  - 要不要開放唯讀權限、讓 Store 程式也套用記憶，第 6 階段實測後再決定。
+  - 記憶檔讀不到：只記在記憶體，程式關掉就忘。
+  - 目前不開放權限給沙盒（2026-11-22）：記憶檔裡是使用者打過的詞，開放後所有 Store 程式都讀得到。之後如果想讓沙盒程式也套用記憶，可以改成由不在沙盒裡的小程式代讀。
 
 ### 2.5 中英切換（單按 Shift）
 
@@ -212,7 +231,7 @@ windows/
     - 使用者在 Claude 外面執行 `register.ps1 -Install`（Program Files）和 `register.ps1`（寫到真正的 AppData）之後，記事本、設定、開始功能表搜尋都正常，關掉「使用舊版的微軟注音」也正常。證據：從 Claude 裡寫進 `%LOCALAPPDATA%\BangbangZhuyin` 的測試檔出現在 Claude 的 LocalCache；同一個 DLL 路徑，記事本載入的是新版（映像大小 4,304,896），Claude 裡看到的是 12:31 的舊版。
     - 因此開發版改部署到 `windows\out\deploy`（D 槽，不會轉存）。從 Claude 裡寫 HKCU 也會轉存，例如替棒棒注音加的 `Tsf3Override` 旗標系統根本沒看到（已刪除）。
     - 從 Claude 裡用 `Start-Process -Verb RunAs` 開的系統管理員程序也在同一個封裝環境裡（2026-11-22 用記號檔確認），所以以前 regsvr32 註冊得到私有副本。清掉第 3 階段留下的 Program Files 安裝與 AppData 舊檔時，真正的 AppData 資料夾要在私有副本刪掉之後才看得到、刪得掉。
-    - 第 6 階段要處理同一個問題：選字記憶檔在 `%APPDATA%`，輸入法在 Claude、記事本這些封裝程式裡寫入時，會各自轉存到它們的私有資料夾，記憶會分散。
+    - 第 6 階段要處理同一個問題：選字記憶檔在 `%APPDATA%`，輸入法在 Claude、記事本這些封裝程式裡寫入時，會各自轉存到它們的私有資料夾，記憶會分散。（已處理：實測發現只有新建的資料夾會被轉存，做法見 2.4。）
     - 調查中補上的 UIELEMENTENABLED、INPUTMODECOMPARTMENT、SECUREMODE 都不是記事本問題的原因，但 SampleIME 都有註冊、之後的階段也用得到，保留。
   - 調查時確認、之後除錯可能用得到的事實：
     - 新版記事本（11.2607，WinAppSDK 2.7）自帶的 `riched20.dll` 透過 `Windows.UI.Text.Core`（CoreText，類別 `CTSF30Base`）接文字輸入；棒棒注音照樣以傳統 TIP 的方式載入它的行程。
@@ -239,7 +258,7 @@ windows/
 - **實作紀錄**（2026-11-21）：
   - 引擎已經處理所有候選鍵（↓ 開啟、1–9、↑↓、空白／→／PageDown、←／PageUp、Enter、Esc），外殼只負責顯示。另外加了 Windows 版專用的 `highlightCandidate`／`chooseCandidate`，給 UI-less 操作與滑鼠點選用（單元測試確認結果和按鍵操作相同）。
   - `CandidateRenderer`：Direct2D＋DirectWrite 量測與繪製，比例照 Mac 版（列高 30、邊距 6、編號欄 22、候選字 20、編號 13、頁碼 11 DIP），字型微軟正黑體 UI。淺色／深色依「應用程式模式」，反白用系統強調色（字的黑白依亮度決定），高對比模式用系統色。testpad 的 `--render-candidates` 用同一份程式把樣本畫成 PNG 檢查外觀。
-  - `CandidateWindow`：WS_POPUP＋TOPMOST／TOOLWINDOW／NOACTIVATE，WM_MOUSEACTIVATE 回 MA_NOACTIVATE；在宿主的 UI 執行緒建立、沿用該執行緒的 DPI 設定，依視窗（或每螢幕 DPI 程式所在螢幕）的 DPI 放大；Windows 11 圓角；顯示、隱藏、改變時送出 EVENT_OBJECT_IME_*。可以用滑鼠點選（Mac 版沒有，Windows 使用者習慣）。視窗類別在 DLL 被 FreeLibrary 卸載時取消註冊。d2d1／dwrite／dwmapi／shcore 延遲載入，沒開過候選窗的程式不會載入它們。
+  - `CandidateWindow`：WS_POPUP＋TOPMOST／TOOLWINDOW／NOACTIVATE，WM_MOUSEACTIVATE 回 MA_NOACTIVATE；在宿主的 UI 執行緒建立、沿用該執行緒的 DPI 設定，依視窗（或每螢幕 DPI 程式所在螢幕）的 DPI 放大；Windows 11 圓角；顯示、隱藏、改變時送出 EVENT_OBJECT_IME_*。可以用滑鼠點選（Mac 版沒有，Windows 使用者習慣）。視窗類別在 DLL 被 FreeLibrary 卸載時取消註冊。d2d1／dwrite／dwmapi／shcore 延遲載入，沒開過候選窗的程式不會載入它們。第 6 階段改成 Direct2D 軟體繪製，並在顯示前畫好（見第 6 階段的實作紀錄）。
   - 位置：在 edit session 裡對正在選字的那段文字呼叫 `ITfContextView::GetTextExt`，放在下方，放不下改放上方，不超出工作區；拿不到時退回系統游標，再退回滑鼠位置。候選窗開著時註冊 `ITfTextLayoutSink`，版面改變（例如 Chrome 晚一步排好版）就重新定位。
   - UI-less：每次開候選先 `BeginUIElement`；程式回答自己畫（或以 `TF_TMAE_UIELEMENTENABLEDONLY` 啟用）就不顯示候選窗。`CandidateListUI` 實作 `ITfCandidateListUIElementBehavior`（數量、字串、反白、分頁、SetSelection／Finalize／Abort），內容變更時依差異回報 `TF_CLUIE_*` 並 `UpdateUIElement`，關閉時 `EndUIElement`。
   - testpad 新增 9 項候選測試：候選窗顯示、位置（不蓋住游標那一行）、不搶焦點、UI 元件內容和引擎逐項相同，以及扮演 UI-less 程式（`ITfUIElementSink` 回答自己畫）用 SetSelection／Finalize／Abort 操作。
@@ -274,6 +293,34 @@ windows/
   - 兩個程式同時學習，記憶不會互相覆蓋或損壞；A 程式學到的，B 程式用得到。
   - Mac 的記憶檔複製過來可以直接用。
   - 上面每個程式都能正常輸入，候選窗位置正確。
+- **實作紀錄**（2026-11-22）：
+  - **引擎**：
+    - `SharedFile`：檔案版本、鎖檔、POSIX 式取代、清掉當掉的程式留下的暫存檔、檢查資料夾有沒有被轉存。
+    - `UserModel`：新增 `refresh()`、`flush()` 和待寫入的變更清單。重做變更時，時間不倒退。
+  - **TSF 外殼**：開始組字前（`OnKeyDown` 處理第一個鍵之前）呼叫 `refresh()`；輸入法停用時，還有沒寫進去的變更就 `flush()`。
+  - **取代檔案**：`MoveFileEx` 在別的程式開著原檔讀取時會失敗（即使對方允許刪除，實測），所以改用 `SetFileInformationByHandle(FileRenameInfoEx)` 加 POSIX 旗標。不支援時才退回 `MoveFileEx`，並重試 0.1 秒。
+  - **速度**：
+    - 原本用 nlohmann 建整棵 JSON 樹，2 萬筆要載入 136 ms、學習 78 ms。
+    - 改成串流解析（SAX）、直接輸出 JSON、每格的候選改用小陣列之後，降到 65 ms、13 ms（見 2.4）。
+  - **單元測試**新增 14 項，x64／x86 各 79 項全部通過：
+    - 兩個 UserModel 看得到對方的學習；同時學習會合併；次數會累加。
+    - 清除記憶或刪掉檔案，會傳到別的程式。
+    - 鎖被別人佔住時不會卡住，也不會遺失；重新載入後，還沒寫進去的變更仍保留。
+    - 會清掉殘留的暫存檔；壞檔會改名保留。
+    - 四個子程序同時各學 36 次，全部保留、次數正確。
+    - 取代檔案時讀的人不受影響；檔案版本、鎖、資料夾檢查。
+    - 真模型：「我愛」後選「妳」→「你」，跨兩個程式。
+  - **testpad**：
+    - 自動測試改用暫存的記憶檔（測完刪掉）。
+    - 新增 2 項：testpad 用另一份引擎扮演別的程式，和輸入法 DLL 讀寫同一個記憶檔。別的程式選「妳」，輸入法就打出「妳」；輸入法改選「你」，別的程式也變回「你」。
+    - x64、x86 各 41 項全部通過。x86 版也確認 90 MB 的模型在 32 位元程式裡載入正常。
+  - 使用者手動測試通過（2026-11-22）：跨程式記憶、封裝程式、Mac 記憶檔、各程式打字與候選窗位置。
+  - **新程式第一次選字時，候選窗先空白一下**（使用者回報，2026-11-22）：
+    - 用 `testpad --time-candidates` 在新的程序裡拆開量：建立顯示卡的繪圖目標（初始化 Direct3D 與顯示卡驅動程式）要約 185 ms，其他步驟合計約 10 ms。視窗在這之前就顯示了，所以先看到空白的視窗。
+    - 改用 Direct2D 軟體繪製：建立只要約 11 ms，每次畫 1～4 ms，也不用等螢幕的垂直同步（顯示卡模式每次要等約 16 ms）。
+    - 繪圖目標在視窗還隱藏時就建好；顯示時同步畫好；從隱藏變成顯示時先 cloak（`DWMWA_CLOAK`），畫好再現身。
+    - 結果：第一次顯示約 21 ms（x86 約 25～37 ms），內容和視窗同時出現；之後每次 2～4 ms。擷取螢幕上的候選窗確認外觀不變。
+    - 使用者確認延遲消失（2026-11-22）。第 6 階段驗收完成。
 
 ### 第 7 階段：安裝、解除安裝與更新（中）
 
@@ -312,9 +359,10 @@ windows/
 | DLL 出錯會讓宿主程式當掉 | COM 邊界攔下例外；模型載入失敗時按鍵全部交還；每個階段都在多個程式測 |
 | 各程式的 TSF 行為不一致（Word 不能同步編輯；Chrome、Terminal、Electron 回報的位置） | 用非同步 edit session；拿不到位置時退回游標位置；第 3 階段起就在多個程式測 |
 | 結果和 Mac 版有細微差異 | float、穩定排序；三組評測加上逐句比對 |
-| Store 程式讀不到記憶檔 | 讀寫失敗安靜略過；第 6 階段決定是否開放唯讀權限 |
+| Store 程式讀不到記憶檔 | 只記在記憶體；目前不開放權限給沙盒（見 2.4） |
+| 封裝程式（MSIX）把記憶檔轉存到私有位置 | 確認資料夾的實際位置，被轉存就不寫（見 2.4） |
 | 更新時 DLL 被使用中的程式鎖住 | 先改名再複製；提示登出 |
-| 32 位元程式裡 90 MB 的檔案對應失敗 | 失敗時按鍵全部交還並記錄；第 6 階段實測 |
+| 32 位元程式裡 90 MB 的檔案對應失敗 | 失敗時按鍵全部交還並記錄；x86 版 testpad 實測正常（2026-11-22） |
 | 這台電腦是 Insider 版 Windows（build 26300） | 遇到奇怪的問題時，到正式版 Windows 上再確認 |
 | 未簽章的 DLL 被防毒軟體或 SmartScreen 警告 | 自用可以接受；分享前再考慮簽章 |
 

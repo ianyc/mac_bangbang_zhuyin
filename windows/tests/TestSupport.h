@@ -133,4 +133,21 @@ struct TempFile {
     }
 };
 
+/// 測試結束時連同裡面的檔案一起刪除的暫存資料夾（記憶檔旁邊還會有鎖檔）。
+struct TempDir {
+    std::filesystem::path path;
+    explicit TempDir(const std::string& stem) {
+        static int counter = 0;
+        path = std::filesystem::temp_directory_path() /
+               (stem + "-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(++counter));
+        std::filesystem::create_directories(path);
+    }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+
 }  // namespace bangbang::test

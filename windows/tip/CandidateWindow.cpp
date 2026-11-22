@@ -100,7 +100,31 @@ bool CandidateWindow::ensureWindow(HWND owner) {
     // Windows 11 圓角（舊版 Windows 不支援，失敗就算了）。
     const DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    createTarget();  // 視窗還沒顯示時就先建好，第一次顯示時直接畫
     return true;
+}
+
+bool CandidateWindow::createTarget() {
+    // 用軟體繪製：候選窗很小，CPU 畫一次只要 1～4 ms。用顯示卡的話，每個程式第一次建立 Direct3D 裝置
+    // 要將近 0.2 秒，新開的程式第一次選字時會先看到空白的候選窗（2026-11-22 用 testpad --time-candidates 實測）；
+    // 每次畫完還要等螢幕的垂直同步。
+    const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1::PixelFormat(), static_cast<float>(dpi_),
+                                                         static_cast<float>(dpi_));
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    const auto size = D2D1::SizeU(static_cast<UINT32>(std::max(1L, client.right - client.left)),
+                                  static_cast<UINT32>(std::max(1L, client.bottom - client.top)));
+    const auto hwndProperties = D2D1::HwndRenderTargetProperties(hwnd_, size, D2D1_PRESENT_OPTIONS_IMMEDIATELY);
+    if (FAILED(d2d_->CreateHwndRenderTarget(properties, hwndProperties, &target_))) {
+        debugLog(L"棒棒注音：無法建立候選窗的繪圖目標");
+        return false;
+    }
+    return true;
+}
+
+void CandidateWindow::cloak(bool hidden) {
+    const BOOL value = hidden ? TRUE : FALSE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_CLOAK, &value, sizeof(value));
 }
 
 UINT CandidateWindow::dpiFor(const RECT& anchor) const {
@@ -146,8 +170,13 @@ void CandidateWindow::show(const CandidatePage& page, const RECT& anchor, HWND o
     theme_ = CandidateTheme::current();
     const BOOL dark = theme_.dark ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    // 從隱藏變成顯示：先讓視窗隱形（cloak），畫好內容再現身，不會先閃一下空白的視窗。
+    if (!wasShown) cloak(true);
     place();
+    // 馬上畫，不等程式的訊息迴圈有空才處理 WM_PAINT。
     InvalidateRect(hwnd_, nullptr, FALSE);
+    UpdateWindow(hwnd_);
+    if (!wasShown) cloak(false);
     NotifyWinEvent(wasShown ? EVENT_OBJECT_IME_CHANGE : EVENT_OBJECT_IME_SHOW, hwnd_, OBJID_CLIENT, CHILDID_SELF);
 }
 
@@ -170,15 +199,7 @@ bool CandidateWindow::isShown() const {
 void CandidateWindow::paint() {
     PAINTSTRUCT ps;
     BeginPaint(hwnd_, &ps);
-    if (!target_) {
-        RECT client{};
-        GetClientRect(hwnd_, &client);
-        const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(),
-                                                             static_cast<float>(dpi_), static_cast<float>(dpi_));
-        const auto hwndProperties = D2D1::HwndRenderTargetProperties(
-            hwnd_, D2D1::SizeU(static_cast<UINT32>(client.right - client.left), static_cast<UINT32>(client.bottom - client.top)));
-        d2d_->CreateHwndRenderTarget(properties, hwndProperties, &target_);
-    }
+    if (!target_) createTarget();  // 上次畫的時候要求重建
     if (target_) {
         target_->BeginDraw();
         renderer_.draw(target_.Get(), page_, theme_);
