@@ -6,12 +6,19 @@
 //                            需要先用 windows\scripts\register.ps1 註冊輸入法。測試時不要點別的視窗：
 //                            測試視窗不在前景時，按鍵不會交給輸入法，那幾項會標成「略過」。
 //                            結束代碼：0 全部通過；1 有失敗；2 無法開始；3 沒有失敗但有略過。
+//                            也檢查候選窗（顯示位置、不搶焦點、UI 元件的內容）與 UI-less 模式。
+//   testpad.exe --render-candidates <資料夾>
+//                            把幾種候選窗內容畫成 PNG（淺色／深色、100%／150%），檢查外觀用，不需要輸入法。
 #include <windows.h>
 #include <msctf.h>
 #include <richedit.h>
+#include <wincodec.h>
 #include <wrl/client.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -19,6 +26,8 @@
 #include <vector>
 
 #include "BangbangVersion.h"
+#include "CandidateRenderer.h"
+#include "CandidateWindow.h"
 #include "Guids.h"
 #include "InputSession.h"
 #include "LanguageModel.h"
@@ -123,11 +132,13 @@ int runInteractive() {
 // MARK: - 自動測試
 
 /// 一個模擬按鍵：要送給 TSF 的虛擬鍵碼與 Shift 狀態，以及引擎應該收到的 KeyEvent（標準答案）。
+/// check 不是空字串時，這一步不是按鍵，而是檢查或操作（見 parseKeys 的 <?…>）。
 struct ScriptKey {
     UINT vk = 0;
     bool shift = false;
     KeyEvent event;
     std::string label;
+    std::string check;
 };
 
 std::optional<UINT> virtualKeyFor(char c) {
@@ -152,6 +163,11 @@ std::optional<UINT> virtualKeyFor(char c) {
 /// 按鍵腳本，格式同 bangbang-tool keys：小寫字母、數字、標點是一般按鍵，大寫字母是 Shift+字母，空白是空白鍵；
 /// <enter> <esc> <bs> <del> <left> <right> <up> <down> <home> <end> <tab> <space>、
 /// <num0>～<num9>（數字鍵盤）、<S-x>（Shift+x）。
+/// 另外有檢查與操作（不送按鍵）：
+///   <?cand>   候選窗顯示中、不在游標那一行上、沒有搶走焦點　　<?nocand>  候選窗沒有顯示
+///   <?list>   候選字的 UI 元件內容（數量、每一個字、反白、頁碼）和引擎相同
+///   <?uiless> 這一題扮演自己畫候選字的程式（BeginUIElement 回答不要輸入法畫）
+///   <?ui-select:N>、<?ui-finalize>、<?ui-abort>  透過 ITfCandidateListUIElementBehavior 操作
 std::vector<ScriptKey> parseKeys(std::string_view script) {
     using T = KeyEvent::Type;
     static const std::map<std::string, std::pair<UINT, T>> specials = {
@@ -167,7 +183,9 @@ std::vector<ScriptKey> parseKeys(std::string_view script) {
             const std::string name(script.substr(i + 1, close - i - 1));
             const std::string label(script.substr(i, close - i + 1));
             i = close + 1;
-            if (const auto it = specials.find(name); it != specials.end()) {
+            if (!name.empty() && name[0] == '?') {
+                keys.push_back({0, false, KeyEvent{}, label, name.substr(1)});
+            } else if (const auto it = specials.find(name); it != specials.end()) {
                 keys.push_back({it->second.first, false, KeyEvent::of(it->second.second), label});
             } else if (name.size() == 4 && name.rfind("num", 0) == 0) {
                 const char digit = name[3];
@@ -305,6 +323,177 @@ void probeCompartments(ITfThreadMgr* threadMgr) {
     if (SUCCEEDED(activated)) threadMgr->Deactivate();
 }
 
+// MARK: - 候選窗的檢查
+
+/// 扮演「程式」決定要不要讓輸入法自己畫候選窗（ITfUIElementSink）；drawItself 為 true 時就是 UI-less 模式。
+class UIElementSink final : public ITfUIElementSink {
+public:
+    bool drawItself = false;
+    DWORD current = TF_INVALID_UIELEMENTID;
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (!IsEqualIID(riid, IID_IUnknown) && !IsEqualIID(riid, IID_ITfUIElementSink)) return E_NOINTERFACE;
+        *ppv = static_cast<ITfUIElementSink*>(this);
+        AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++references_; }
+    STDMETHODIMP_(ULONG) Release() override {
+        const ULONG remaining = --references_;
+        if (remaining == 0) delete this;
+        return remaining;
+    }
+    STDMETHODIMP BeginUIElement(DWORD id, BOOL* show) override {
+        current = id;
+        if (show) *show = drawItself ? FALSE : TRUE;
+        return S_OK;
+    }
+    STDMETHODIMP UpdateUIElement(DWORD) override { return S_OK; }
+    STDMETHODIMP EndUIElement(DWORD id) override {
+        if (id == current) current = TF_INVALID_UIELEMENTID;
+        return S_OK;
+    }
+
+private:
+    ULONG references_ = 1;
+};
+
+HWND findCandidateWindow() {
+    HWND found = nullptr;
+    EnumThreadWindows(
+        GetCurrentThreadId(),
+        [](HWND hwnd, LPARAM param) -> BOOL {
+            wchar_t name[64] = {};
+            GetClassNameW(hwnd, name, static_cast<int>(std::size(name)));
+            if (wcscmp(name, CandidateWindow::kClassName) != 0) return TRUE;
+            *reinterpret_cast<HWND*>(param) = hwnd;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+
+/// 候選窗顯示中：不能搶走焦點，也不能蓋住游標那一行（放在下方或上方）。
+void checkCandidateShown(HWND window, HWND target, std::string& problems) {
+    const HWND candidate = findCandidateWindow();
+    if (!candidate || !IsWindowVisible(candidate)) {
+        problems += "  候選窗沒有出現\n";
+        return;
+    }
+    if (!(GetWindowLongW(candidate, GWL_EXSTYLE) & WS_EX_NOACTIVATE)) problems += "  候選窗少了 WS_EX_NOACTIVATE\n";
+    if (GetForegroundWindow() != window || GetFocus() != target) problems += "  候選窗搶走了焦點\n";
+    RECT box{};
+    GetWindowRect(candidate, &box);
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret) {
+        RECT caret = info.rcCaret;
+        MapWindowPoints(info.hwndCaret, nullptr, reinterpret_cast<POINT*>(&caret), 2);
+        const LONG middle = (caret.top + caret.bottom) / 2;
+        if (box.top < middle && box.bottom > middle) problems += "  候選窗蓋住了游標那一行\n";
+        if (std::abs(box.top - caret.bottom) > 300 && std::abs(caret.top - box.bottom) > 300) problems += "  候選窗離游標太遠\n";
+    }
+}
+
+void checkCandidateHidden(std::string& problems) {
+    const HWND candidate = findCandidateWindow();
+    if (candidate && IsWindowVisible(candidate)) problems += "  候選窗應該已經關閉\n";
+}
+
+ComPtr<ITfCandidateListUIElementBehavior> candidateElement(ITfUIElementMgr* uiMgr, const UIElementSink& sink) {
+    ComPtr<ITfUIElement> element;
+    ComPtr<ITfCandidateListUIElementBehavior> behavior;
+    if (uiMgr && sink.current != TF_INVALID_UIELEMENTID && SUCCEEDED(uiMgr->GetUIElement(sink.current, &element))) element.As(&behavior);
+    return behavior;
+}
+
+/// UI 元件的內容（數量、每一個字、反白、頁碼）要和引擎的候選窗完全相同。
+void checkCandidateList(ITfUIElementMgr* uiMgr, const UIElementSink& sink, const InputSession& oracle, std::string& problems) {
+    const auto& list = oracle.candidateList();
+    if (!list) {
+        problems += "  （腳本錯誤）引擎沒有開候選窗\n";
+        return;
+    }
+    const auto element = candidateElement(uiMgr, sink);
+    if (!element) {
+        problems += "  找不到候選字的 UI 元件（BeginUIElement 沒有被呼叫）\n";
+        return;
+    }
+    GUID guid{};
+    element->GetGUID(&guid);
+    if (!IsEqualGUID(guid, kCandidateUIElementGuid)) problems += "  UI 元件的 GUID 不對\n";
+    UINT count = 0, selection = 0, page = 0, pages = 0;
+    element->GetCount(&count);
+    element->GetSelection(&selection);
+    element->GetCurrentPage(&page);
+    element->GetPageIndex(nullptr, 0, &pages);
+    const auto expect = [&](const char* what, UINT actual, int expected) {
+        if (actual != static_cast<UINT>(expected)) {
+            problems += std::string("  UI 元件的") + what + " " + std::to_string(actual) + "，應為 " + std::to_string(expected) + "\n";
+        }
+    };
+    expect("候選數", count, static_cast<int>(list->items.size()));
+    expect("反白位置", selection, list->highlighted);
+    expect("目前頁", page, list->page());
+    expect("頁數", pages, list->pageCount());
+    for (UINT i = 0; i < std::min<UINT>(count, static_cast<UINT>(list->items.size())); ++i) {
+        BSTR text = nullptr;
+        if (FAILED(element->GetString(i, &text)) || !text) {
+            problems += "  UI 元件讀不到第 " + std::to_string(i + 1) + " 個候選\n";
+            break;
+        }
+        const std::string actual = utf8::fromWide(std::wstring(text, SysStringLen(text)));
+        SysFreeString(text);
+        const std::string expected = list->items[i].displayText();
+        if (actual != expected) {
+            problems += "  UI 元件第 " + std::to_string(i + 1) + " 個候選「" + actual + "」，應為「" + expected + "」\n";
+            break;
+        }
+    }
+}
+
+/// 執行腳本裡的一個檢查或操作（<?…>）；操作會同時套用到輸入法與引擎（標準答案）。
+void runCheck(const std::string& check, HWND window, HWND target, ITfUIElementMgr* uiMgr, UIElementSink& sink, InputSession& oracle,
+              std::string& problems) {
+    if (check == "cand") {
+        checkCandidateShown(window, target, problems);
+    } else if (check == "nocand") {
+        checkCandidateHidden(problems);
+    } else if (check == "list") {
+        checkCandidateList(uiMgr, sink, oracle, problems);
+    } else if (check == "uiless") {
+        sink.drawItself = true;
+    } else if (check.rfind("ui-", 0) == 0) {
+        const auto element = candidateElement(uiMgr, sink);
+        if (!element) {
+            problems += "  找不到候選字的 UI 元件，無法執行 " + check + "\n";
+            return;
+        }
+        HRESULT hr = E_FAIL;
+        if (check.rfind("ui-select:", 0) == 0) {
+            const int index = std::atoi(check.c_str() + 10);
+            hr = element->SetSelection(static_cast<UINT>(index));
+            oracle.highlightCandidate(index);
+        } else if (check == "ui-finalize") {
+            hr = element->Finalize();
+            if (oracle.candidateList()) oracle.chooseCandidate(oracle.candidateList()->highlighted);
+        } else if (check == "ui-abort") {
+            hr = element->Abort();
+            oracle.handle(KeyEvent::of(KeyEvent::Type::Escape));
+        }
+        if (FAILED(hr)) {
+            char code[16];
+            std::snprintf(code, sizeof(code), "%08lX", static_cast<unsigned long>(hr));
+            problems += "  " + check + " 失敗（0x" + code + "）\n";
+        }
+        pumpMessages();
+    } else {
+        problems += "  （腳本錯誤）不認得的檢查 <?" + check + ">\n";
+    }
+}
+
 struct TestCase {
     const char* name;
     std::string keys;
@@ -334,6 +523,16 @@ std::vector<TestCase> testCases() {
         {"數字鍵盤：組字中進組字區", "su3<num1><enter>"},
         {"組字區超過 20 格，自動送出最前面的詞", longSentence + "<enter>"},
         {"沒有送出時，文件裡是組字中的文字", "su3cl3"},
+        // 候選窗（第 4 階段）。「中文輸入法」= 5j/ jp6gj bj4z83
+        {"候選窗：游標在最後按 ↓，只列最後一個字", "5j/ jp6gj bj4z83<down><?cand><?list><enter><?nocand>"},
+        {"候選窗：↓ 移動反白，Enter 選字", "5j/ jp6<down><down><?cand><?list><enter><?nocand>"},
+        {"候選窗：數字鍵選字", "5j/ jp6<down><?cand>2<?nocand>"},
+        {"候選窗：游標在字前面按 ↓，列出從這個字開始的詞", "5j/ jp6gj bj4z83<home><right><right><down><?cand><?list>1<?nocand>"},
+        {"候選窗：空白鍵翻頁，Esc 關閉", "5j/ <down><space><?cand><?list><esc><?nocand>"},
+        {"符號候選：在「：」上按 ↓", "<S-;><down><?cand><?list><down><enter><?nocand>"},
+        {"括號配對：在組字區換括號", "<S-[>5j/ <S-]><home><down><?list>2<?nocand>"},
+        {"UI-less：程式自己畫，輸入法不顯示候選窗", "<?uiless>5j/ jp6<down><?nocand><?list><?ui-select:1><?list><?ui-finalize><?nocand>"},
+        {"UI-less：Abort 關閉候選字", "<?uiless>5j/ jp6<down><?ui-abort><?nocand><enter>"},
     };
 }
 
@@ -374,10 +573,19 @@ int runSelfTest(const std::filesystem::path& modelPath) {
     }
     ComPtr<ITfThreadMgr> threadMgr;
     ComPtr<ITfKeystrokeMgr> keystrokes;
+    ComPtr<ITfUIElementMgr> uiMgr;
     if (FAILED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&threadMgr))) ||
-        FAILED(threadMgr.As(&keystrokes))) {
+        FAILED(threadMgr.As(&keystrokes)) || FAILED(threadMgr.As(&uiMgr))) {
         std::printf("無法取得 TSF 的按鍵管理員\n");
         return 2;
+    }
+    // 扮演程式接收候選字 UI 元件的通知（UI-less 測試用；一般測試時回答「請輸入法自己畫」）。
+    ComPtr<UIElementSink> sink;
+    sink.Attach(new UIElementSink());
+    ComPtr<ITfSource> source;
+    DWORD sinkCookie = TF_INVALID_COOKIE;
+    if (FAILED(threadMgr.As(&source)) || FAILED(source->AdviseSink(IID_ITfUIElementSink, sink.Get(), &sinkCookie))) {
+        std::printf("（無法註冊 ITfUIElementSink，候選字的 UI 元件檢查會失敗）\n");
     }
 
     int passed = 0, failed = 0, skipped = 0;
@@ -411,7 +619,12 @@ int runSelfTest(const std::filesystem::path& modelPath) {
         InputSession oracle(lm);
         std::string expectedCommits;
         std::string problems;
+        sink->drawItself = false;
         for (const auto& key : parseKeys(test.keys)) {
+            if (!key.check.empty()) {
+                runCheck(key.check, window, target, uiMgr.Get(), *sink.Get(), oracle, problems);
+                continue;
+            }
             const SessionOutput out = oracle.handle(key.event);
             expectedCommits += out.commit;
             const bool eaten = sendKey(keystrokes.Get(), key);
@@ -422,11 +635,10 @@ int runSelfTest(const std::filesystem::path& modelPath) {
         const std::string expected = expectedCommits + (oracle.isComposing() ? oracle.markedText() : "");
         const std::string actual = windowText(target);
         if (actual != expected) problems += "  文件內容：「" + actual + "」，應為「" + expected + "」\n";
-        // 結束這一題：輸入法還在組字的話，按兩次 Esc 清掉（第一次清注音、第二次清組字區）。
+        // 結束這一題：輸入法還在組字的話按 Esc 清掉（候選窗、注音、組字區各要一次）。
         if (oracle.isComposing()) {
             const ScriptKey escape = parseKeys("<esc>").front();
-            sendKey(keystrokes.Get(), escape);
-            sendKey(keystrokes.Get(), escape);
+            for (int i = 0; i < 3; ++i) sendKey(keystrokes.Get(), escape);
         }
         if (problems.empty()) {
             ++passed;
@@ -446,10 +658,94 @@ int runSelfTest(const std::filesystem::path& modelPath) {
     } else {
         std::printf("通過 %d 項，失敗 %d 項\n", passed, failed);
     }
+    if (source && sinkCookie != TF_INVALID_COOKIE) source->UnadviseSink(sinkCookie);
     DestroyWindow(window);
     pumpMessages();
     if (failed > 0) return 1;
     return skipped > 0 ? 3 : 0;
+}
+
+// MARK: - 候選窗外觀（PNG）
+
+HRESULT renderPng(ID2D1Factory* d2d, IWICImagingFactory* wic, const CandidateRenderer& renderer, const CandidatePage& page,
+                  const CandidateTheme& theme, UINT dpi, const std::filesystem::path& path) {
+    const D2D1_SIZE_F size = renderer.measure(page);
+    const float scale = static_cast<float>(dpi) / 96.0f;
+    const auto width = static_cast<UINT>(std::ceil(size.width * scale));
+    const auto height = static_cast<UINT>(std::ceil(size.height * scale));
+    ComPtr<IWICBitmap> bitmap;
+    HRESULT hr = wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap);
+    ComPtr<ID2D1RenderTarget> target;
+    if (SUCCEEDED(hr)) {
+        const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                                                             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+                                                             static_cast<float>(dpi), static_cast<float>(dpi));
+        hr = d2d->CreateWicBitmapRenderTarget(bitmap.Get(), properties, &target);
+    }
+    if (SUCCEEDED(hr)) {
+        target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        target->BeginDraw();
+        renderer.draw(target.Get(), page, theme);
+        hr = target->EndDraw();
+    }
+    ComPtr<IWICStream> stream;
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> frame;
+    if (SUCCEEDED(hr)) hr = wic->CreateStream(&stream);
+    if (SUCCEEDED(hr)) hr = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
+    if (SUCCEEDED(hr)) hr = wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (SUCCEEDED(hr)) hr = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+    if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, nullptr);
+    if (SUCCEEDED(hr)) hr = frame->Initialize(nullptr);
+    if (SUCCEEDED(hr)) hr = frame->SetSize(width, height);
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppPBGRA;
+    if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&format);
+    if (SUCCEEDED(hr)) hr = frame->WriteSource(bitmap.Get(), nullptr);
+    if (SUCCEEDED(hr)) hr = frame->Commit();
+    if (SUCCEEDED(hr)) hr = encoder->Commit();
+    return hr;
+}
+
+/// --render-candidates <資料夾>：把幾種候選窗內容畫成 PNG（淺色／深色、100%／150%），檢查外觀用，不需要輸入法。
+int renderCandidates(const std::filesystem::path& folder) {
+    CandidateRenderer renderer;
+    ComPtr<ID2D1Factory> d2d;
+    ComPtr<IWICImagingFactory> wic;
+    if (FAILED(renderer.initialize()) || FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, d2d.GetAddressOf())) ||
+        FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic)))) {
+        std::printf("無法建立 Direct2D／DirectWrite／WIC\n");
+        return 2;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(folder, error);
+    struct Sample {
+        const char* name;
+        CandidatePage page;
+    };
+    const std::vector<Sample> samples = {
+        {"chars", {{L"法", L"髮", L"發", L"罰", L"伐", L"筏", L"乏", L"閥", L"琺"}, 0, 0, 3}},
+        {"phrases", {{L"輸入法", L"輸入", L"輸", L"書", L"舒", L"殊"}, 2, 0, 1}},
+        {"symbols", {{L"：", L":", L"；", L";"}, 1, 0, 1}},
+        {"spaces", {{L"半形空白", L"全形空白"}, 0, 0, 1}},
+        {"extb", {{L"𨑨迌", L"𨑨", L"𰻞𰻞麵"}, 0, 1, 2}},
+    };
+    const COLORREF accent = CandidateTheme::systemAccent();
+    int written = 0;
+    for (const bool dark : {false, true}) {
+        for (const UINT dpi : {96u, 144u}) {
+            for (const auto& sample : samples) {
+                const std::wstring name = utf8::toWide(sample.name) + (dark ? L"-dark-" : L"-light-") + std::to_wstring(dpi) + L".png";
+                const HRESULT hr = renderPng(d2d.Get(), wic.Get(), renderer, sample.page, CandidateTheme::make(dark, accent), dpi, folder / name);
+                if (FAILED(hr)) {
+                    std::printf("無法輸出 %ls（0x%08lX）\n", name.c_str(), static_cast<unsigned long>(hr));
+                    return 1;
+                }
+                ++written;
+            }
+        }
+    }
+    std::printf("已輸出 %d 張候選窗圖片到 %ls\n", written, folder.c_str());
+    return 0;
 }
 
 }  // namespace
@@ -458,6 +754,7 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     bool selfTest = false;
+    std::optional<std::filesystem::path> renderFolder;
     std::filesystem::path modelPath(BANGBANG_DEFAULT_MODEL);
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
@@ -466,12 +763,14 @@ int wmain(int argc, wchar_t** argv) {
         } else if (arg == L"--probe-compartments") {
             selfTest = true;
             g_probeCompartments = true;
+        } else if (arg == L"--render-candidates" && i + 1 < argc) {
+            renderFolder = argv[++i];
         } else if (arg == L"--lm" && i + 1 < argc) {
             modelPath = argv[++i];
         }
     }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    const int code = selfTest ? runSelfTest(modelPath) : runInteractive();
+    const int code = renderFolder ? renderCandidates(*renderFolder) : selfTest ? runSelfTest(modelPath) : runInteractive();
     CoUninitialize();
     return code;
 }

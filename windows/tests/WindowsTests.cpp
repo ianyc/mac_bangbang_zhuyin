@@ -93,6 +93,50 @@ TEST(SessionConsistencyTests, WouldHandleMatchesHandleInEveryState) {
     EXPECT_GT(checked, 900);
 }
 
+// MARK: - UI-less 與滑鼠點選用的候選操作
+
+/// highlightCandidate／chooseCandidate 的結果，要和用方向鍵、數字鍵操作完全一樣。
+TEST(CandidateApiTests, MatchesKeyboardOperation) {
+    const auto lm = makeLM();
+    // 用按鍵：游標移到最前，↓ 開候選，↓ 反白第 2 個，Enter 選它。
+    InputSession byKeys(lm);
+    type(byKeys, "5j/ jp6");  // ㄓㄨㄥ ㄨㄣˊ → 中文
+    byKeys.handle(key(T::Home));
+    byKeys.handle(key(T::Down));
+    ASSERT_TRUE(byKeys.candidateList().has_value());
+    byKeys.handle(key(T::Down));
+    byKeys.handle(key(T::Enter));
+
+    InputSession byApi(lm);
+    type(byApi, "5j/ jp6");
+    byApi.handle(key(T::Home));
+    byApi.handle(key(T::Down));
+    ASSERT_TRUE(byApi.highlightCandidate(1));
+    EXPECT_EQ(byApi.candidateList()->highlighted, 1);
+    ASSERT_TRUE(byApi.chooseCandidate(byApi.candidateList()->highlighted));
+    EXPECT_FALSE(byApi.candidateList().has_value());
+
+    EXPECT_EQ(byApi.markedText(), byKeys.markedText());
+    EXPECT_EQ(byApi.markedCursor(), byKeys.markedCursor());
+}
+
+/// 候選窗沒開、或位置超出範圍時，不改變任何狀態。
+TEST(CandidateApiTests, IgnoresInvalidRequests) {
+    const auto lm = makeLM();
+    InputSession session(lm);
+    type(session, "5j/ jp6");
+    EXPECT_FALSE(session.highlightCandidate(0));
+    EXPECT_FALSE(session.chooseCandidate(0));
+    session.handle(key(T::Down));
+    ASSERT_TRUE(session.candidateList().has_value());
+    const int count = static_cast<int>(session.candidateList()->items.size());
+    EXPECT_FALSE(session.highlightCandidate(-1));
+    EXPECT_FALSE(session.highlightCandidate(count));
+    EXPECT_FALSE(session.chooseCandidate(count));
+    EXPECT_EQ(session.candidateList()->highlighted, 0);
+    EXPECT_EQ(session.markedText(), "中文");
+}
+
 // MARK: - BMP 以外的字元
 
 /// 「𨑨」在 UTF-16 佔 2 個單位：組字區仍是一格一字，外殼用 utf16Offset 換算游標位置。

@@ -28,7 +28,7 @@ windows\scripts\register.ps1 -Install        # 改安裝到 Program Files\Bangba
 windows\scripts\register.ps1 -Unregister     # 從鍵盤清單移除、取消註冊，並刪除 Program Files 裡的安裝
 ```
 
-- 之後改了程式，重新建置再執行 `register.ps1` 就好：只會更新檔案，不用再按 UAC（註冊的位置或類別改變時才會再跳出）。已經開著的程式要重新啟動才會用到新版。
+- 之後改了程式，重新建置再執行 `register.ps1` 就好：只會更新檔案，不用再按 UAC（註冊的位置或類別改變時才會再跳出）。已經開著的程式要重新啟動才會用到新版；Chrome、Edge 關掉視窗後常常還有背景程序，要整個結束（或重新開機）。檔案總管、開始功能表搜尋要登出或重新開機。
 - 用 Win + 空白鍵切換到「棒棒注音」。
 - 開發版放在 `windows\out\deploy`（不納入 git；刪掉 `out` 資料夾後要重新執行 `register.ps1`）。腳本會開放唯讀權限給 Microsoft Store 程式（沙盒）。
 - 不放在 `%LOCALAPPDATA%`：從 MSIX 封裝程式（例如 Claude 桌面版的終端機）裡執行時，新建在 AppData 的檔案會被轉存到那個程式的私有資料夾（`%LOCALAPPDATA%\Packages\<程式>\LocalCache`），其他程式找不到 DLL，只好改用微軟注音。
@@ -40,9 +40,11 @@ windows\scripts\register.ps1 -Unregister     # 從鍵盤清單移除、取消註
 windows\out\build\x64\testpad\Debug\testpad.exe              # 手動測試視窗：上面是 RichEdit（TSF），下面是 EDIT（IMM32 相容層）
 windows\out\build\x86\testpad\Debug\testpad.exe              # 32 位元版，測 32 位元程式的情況
 windows\out\build\x64\testpad\Debug\testpad.exe --selftest   # 自動測試：模擬按鍵，比對輸入法打出的字與引擎結果
+windows\out\build\x64\testpad\Debug\testpad.exe --render-candidates <資料夾>   # 把候選窗樣本畫成 PNG，檢查外觀
 ```
 
-自動測試只在 testpad 自己的視窗裡啟用棒棒注音，不影響其他程式；需要先執行 `register.ps1`。
+- 自動測試只在 testpad 自己的視窗裡啟用棒棒注音，不影響其他程式；需要先執行 `register.ps1`。也會檢查候選窗（是否顯示、位置、不搶焦點、UI 元件內容）與 UI-less 模式。
+- 按鍵要送到輸入法，測試視窗必須在前景。剛操作過電腦時，Windows 不讓背景程式搶焦點，這時按鍵測試會全部標成「略過」：請在自己的終端機執行，跑的時候不要動鍵盤滑鼠。
 
 ## 開發工具 bangbang-tool
 

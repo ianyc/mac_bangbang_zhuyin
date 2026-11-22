@@ -99,6 +99,13 @@ public:
     /// 不改變任何狀態，回答 handle(key) 會不會處理這個按鍵（給 TSF 的 OnTestKeyDown 用）。
     bool wouldHandle(const KeyEvent& key) const;
 
+    /// Windows 版新增（Mac 版沒有）：給 UI-less 模式（程式自己畫候選字，再透過
+    /// ITfCandidateListUIElementBehavior 操作）與滑鼠點選用。index 是整個候選清單裡的位置。
+    /// 候選窗沒有開或 index 超出範圍時不做任何事，回傳 false。
+    bool highlightCandidate(int index);
+    /// 選第 index 個候選，效果同在候選窗按對應的數字鍵（會學習、會移動游標）。
+    bool chooseCandidate(int index);
+
 private:
     const LanguageModel& lm() const { return composition.decoder.lm(); }
     SessionOutput handleCharacter(char c, bool shift);

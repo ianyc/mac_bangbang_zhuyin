@@ -299,6 +299,18 @@ std::optional<SessionOutput> InputSession::handleCandidateKey(const KeyEvent& ke
     return SessionOutput::consumed();
 }
 
+bool InputSession::highlightCandidate(int index) {
+    if (!candidateList_ || index < 0 || index >= static_cast<int>(candidateList_->items.size())) return false;
+    candidateList_->highlighted = index;
+    return true;
+}
+
+bool InputSession::chooseCandidate(int index) {
+    if (!candidateList_ || index < 0 || index >= static_cast<int>(candidateList_->items.size())) return false;
+    choose(candidateList_->items[static_cast<std::size_t>(index)]);
+    return true;
+}
+
 void InputSession::choose(const Candidate& candidateRef) {
     const Candidate candidate = candidateRef;  // 選字會清掉候選清單，先複製
     const bool wasAtEnd = composition.cursor() == composition.count();

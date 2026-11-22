@@ -13,7 +13,7 @@
 | 1 | 引擎移植＋單元測試 | 完成（2026-11-20）：37 個移植測試＋21 個 Windows 新增測試，x64／x86、Debug／Release 全部通過 |
 | 2 | 真模型＋bangbang-tool＋正確率對齊 | 完成（2026-11-20）：三組正確率與 Mac 版相同，見 3 節第 2 階段的「實測結果」 |
 | 3 | 最小 TSF 輸入法（記事本能打字） | 完成（2026-11-21 驗收）：DLL、註冊腳本、testpad 完成；TSF 自動測試 x64／x86 各 20 項通過；記事本、設定、開始功能表搜尋、Claude、Chrome 都能用。開發版改部署到 `windows\out\deploy`（見實作紀錄的 MSIX 轉存問題） |
-| 4 | 候選窗 | |
+| 4 | 候選窗 | 完成（2026-11-22 驗收）：候選窗、位置、UI-less 完成；單元測試 x64／x86 各 60 項通過；testpad x64／x86 各 30 項通過（含 9 項候選與 UI-less）；記事本、Chrome、Claude 手動測試通過 |
 | 5 | 中英切換（單按 Shift）＋工作列圖示 | |
 | 6 | 選字記憶存檔（多程序）＋程式相容性 | |
 | 7 | 安裝、解除安裝與更新 | |
@@ -211,6 +211,7 @@ windows/
     - 所以只有 Claude 與 testpad 載入得到棒棒注音；記事本、設定、開始功能表搜尋等程式照註冊的路徑找不到 DLL，TSF 改用同語言的微軟注音（打出「月更新越南用」、出現微軟的選字框），設定的鍵盤清單也不列出棒棒注音（所以微軟注音的「移除」不能按）。
     - 使用者在 Claude 外面執行 `register.ps1 -Install`（Program Files）和 `register.ps1`（寫到真正的 AppData）之後，記事本、設定、開始功能表搜尋都正常，關掉「使用舊版的微軟注音」也正常。證據：從 Claude 裡寫進 `%LOCALAPPDATA%\BangbangZhuyin` 的測試檔出現在 Claude 的 LocalCache；同一個 DLL 路徑，記事本載入的是新版（映像大小 4,304,896），Claude 裡看到的是 12:31 的舊版。
     - 因此開發版改部署到 `windows\out\deploy`（D 槽，不會轉存）。從 Claude 裡寫 HKCU 也會轉存，例如替棒棒注音加的 `Tsf3Override` 旗標系統根本沒看到（已刪除）。
+    - 從 Claude 裡用 `Start-Process -Verb RunAs` 開的系統管理員程序也在同一個封裝環境裡（2026-11-22 用記號檔確認），所以以前 regsvr32 註冊得到私有副本。清掉第 3 階段留下的 Program Files 安裝與 AppData 舊檔時，真正的 AppData 資料夾要在私有副本刪掉之後才看得到、刪得掉。
     - 第 6 階段要處理同一個問題：選字記憶檔在 `%APPDATA%`，輸入法在 Claude、記事本這些封裝程式裡寫入時，會各自轉存到它們的私有資料夾，記憶會分散。
     - 調查中補上的 UIELEMENTENABLED、INPUTMODECOMPARTMENT、SECUREMODE 都不是記事本問題的原因，但 SampleIME 都有註冊、之後的階段也用得到，保留。
   - 調查時確認、之後除錯可能用得到的事實：
@@ -235,6 +236,14 @@ windows/
   - 符號候選與括號配對正常。
   - 候選窗位置正確、不搶焦點，深淺色與多螢幕 DPI 都正確。
   - 在記事本和 Edge 都測過。
+- **實作紀錄**（2026-11-21）：
+  - 引擎已經處理所有候選鍵（↓ 開啟、1–9、↑↓、空白／→／PageDown、←／PageUp、Enter、Esc），外殼只負責顯示。另外加了 Windows 版專用的 `highlightCandidate`／`chooseCandidate`，給 UI-less 操作與滑鼠點選用（單元測試確認結果和按鍵操作相同）。
+  - `CandidateRenderer`：Direct2D＋DirectWrite 量測與繪製，比例照 Mac 版（列高 30、邊距 6、編號欄 22、候選字 20、編號 13、頁碼 11 DIP），字型微軟正黑體 UI。淺色／深色依「應用程式模式」，反白用系統強調色（字的黑白依亮度決定），高對比模式用系統色。testpad 的 `--render-candidates` 用同一份程式把樣本畫成 PNG 檢查外觀。
+  - `CandidateWindow`：WS_POPUP＋TOPMOST／TOOLWINDOW／NOACTIVATE，WM_MOUSEACTIVATE 回 MA_NOACTIVATE；在宿主的 UI 執行緒建立、沿用該執行緒的 DPI 設定，依視窗（或每螢幕 DPI 程式所在螢幕）的 DPI 放大；Windows 11 圓角；顯示、隱藏、改變時送出 EVENT_OBJECT_IME_*。可以用滑鼠點選（Mac 版沒有，Windows 使用者習慣）。視窗類別在 DLL 被 FreeLibrary 卸載時取消註冊。d2d1／dwrite／dwmapi／shcore 延遲載入，沒開過候選窗的程式不會載入它們。
+  - 位置：在 edit session 裡對正在選字的那段文字呼叫 `ITfContextView::GetTextExt`，放在下方，放不下改放上方，不超出工作區；拿不到時退回系統游標，再退回滑鼠位置。候選窗開著時註冊 `ITfTextLayoutSink`，版面改變（例如 Chrome 晚一步排好版）就重新定位。
+  - UI-less：每次開候選先 `BeginUIElement`；程式回答自己畫（或以 `TF_TMAE_UIELEMENTENABLEDONLY` 啟用）就不顯示候選窗。`CandidateListUI` 實作 `ITfCandidateListUIElementBehavior`（數量、字串、反白、分頁、SetSelection／Finalize／Abort），內容變更時依差異回報 `TF_CLUIE_*` 並 `UpdateUIElement`，關閉時 `EndUIElement`。
+  - testpad 新增 9 項候選測試：候選窗顯示、位置（不蓋住游標那一行）、不搶焦點、UI 元件內容和引擎逐項相同，以及扮演 UI-less 程式（`ITfUIElementSink` 回答自己畫）用 SetSelection／Finalize／Abort 操作。
+  - 手動測試（2026-11-22）：記事本的候選項目全部正常。Chrome 與 Claude 一開始跳不出候選窗，原因是它們還掛著第 3 階段的舊 DLL（Chrome 關掉視窗後仍有背景程序）；完全關掉重開後正常。Chromium 的 `ITfUIElementSink` 會回答「請輸入法自己畫」。
 
 ### 第 5 階段：中英切換＋工作列圖示（小～中）
 

@@ -2,6 +2,7 @@
 
 #include <mutex>
 
+#include "CandidateWindow.h"
 #include "DisplayAttributes.h"
 #include "EditSession.h"
 #include "Globals.h"
@@ -131,6 +132,8 @@ STDMETHODIMP TextService::QueryInterface(REFIID riid, void** ppv) {
         *ppv = static_cast<ITfCompositionSink*>(this);
     } else if (IsEqualIID(riid, IID_ITfDisplayAttributeProvider)) {
         *ppv = static_cast<ITfDisplayAttributeProvider*>(this);
+    } else if (IsEqualIID(riid, IID_ITfTextLayoutSink)) {
+        *ppv = static_cast<ITfTextLayoutSink*>(this);
     }
     if (!*ppv) return E_NOINTERFACE;
     AddRef();
@@ -158,6 +161,7 @@ STDMETHODIMP TextService::ActivateEx(ITfThreadMgr* threadMgr, TfClientId clientI
     return guarded([&]() -> HRESULT {
         threadMgr_ = threadMgr;
         clientId_ = clientId;
+        activateFlags_ = flags;
         engine_ = sharedEngine((flags & TF_TMAE_SECUREMODE) != 0);
         if (engine_ && !session_) session_ = std::make_unique<InputSession>(engine_->lm, engine_->userModel.get());
 
@@ -199,6 +203,12 @@ STDMETHODIMP TextService::Deactivate() {
     return guarded([&]() -> HRESULT {
         // 切換到別的輸入法時，送出整個組字區。
         commitComposition();
+        closeCandidateUI();
+        candidateWindow_.reset();
+        if (candidateUI_) {
+            candidateUI_->detach();  // 程式可能還拿著這個 UI 元件
+            candidateUI_.Reset();
+        }
         if (threadMgr_) {
             ComPtr<ITfSource> source;
             if (SUCCEEDED(threadMgr_.As(&source))) {
@@ -254,7 +264,9 @@ STDMETHODIMP TextService::OnPopContext(ITfContext* context) {
             forgetComposition();
             pendingCommit_.clear();
             if (session_) session_->reset();
+            closeCandidateUI();
         }
+        if (context && layoutContext_.Get() == context) unadviseLayoutSink();
         if (context && activeContext_.Get() == context) activeContext_.Reset();
         return S_OK;
     });
@@ -405,6 +417,7 @@ STDMETHODIMP TextService::OnCompositionTerminated(TfEditCookie ec, ITfCompositio
         pendingCommit_.clear();
         if (session_) session_->reset();
         forgetComposition();
+        closeCandidateUI();
         return S_OK;
     });
 }
@@ -439,6 +452,7 @@ void TextService::commitComposition() {
     std::string text;
     text.swap(pendingCommit_);
     if (session_->isComposing()) text += session_->commitAll();
+    closeCandidateUI();
     const ComPtr<ITfComposition> composition = composition_;
     const ComPtr<ITfContext> context = compositionContext_;
     // 之後的按鍵從新的組字開始；這一段的收尾只處理這一個組字物件，和之後的狀態無關。
@@ -485,6 +499,7 @@ HRESULT TextService::updateDocument(TfEditCookie ec, ITfContext* context) {
     } else if (composition_) {
         finishComposition(ec, context, std::wstring());  // 例如按 Esc 清掉了
     }
+    updateCandidateUI(ec, context);
     return S_OK;
 }
 
@@ -548,6 +563,266 @@ void TextService::finishComposition(TfEditCookie ec, ITfContext* context, const 
 void TextService::forgetComposition() {
     composition_.Reset();
     compositionContext_.Reset();
+}
+
+// MARK: - 候選窗
+
+CandidatePage TextService::currentCandidatePage() const {
+    CandidatePage page;
+    if (!session_ || !session_->candidateList()) return page;
+    const CandidateList& list = *session_->candidateList();
+    const auto [first, last] = list.pageRange();
+    for (int i = first; i < last; ++i) page.items.push_back(utf8::toWide(list.items[static_cast<std::size_t>(i)].displayText()));
+    page.highlighted = list.highlightedInPage();
+    page.page = list.page();
+    page.pageCount = list.pageCount();
+    return page;
+}
+
+void TextService::updateCandidateUI(TfEditCookie ec, ITfContext* context) {
+    if (!session_ || !session_->candidateList() || !composition_ || compositionContext_.Get() != context) {
+        closeCandidateUI();
+        return;
+    }
+    const bool opening = !candidateUIOpen_;
+    if (opening) beginCandidateUI();
+    candidateAnchor_ = candidateAnchor(ec, context);
+    candidateOwner_ = candidateOwner(context);
+    if (candidateWindowAllowed_) {
+        if (!candidateWindow_) {
+            candidateWindow_ = std::make_unique<CandidateWindow>();
+            candidateWindow_->setClickHandler([this](int row) { onCandidateClicked(row); });
+        }
+        candidateWindow_->show(currentCandidatePage(), candidateAnchor_, candidateOwner_);
+        adviseLayoutSink(context);
+    } else if (candidateWindow_) {
+        candidateWindow_->hide();
+    }
+    publishCandidateUI(opening);
+}
+
+void TextService::beginCandidateUI() {
+    candidateUIOpen_ = true;
+    candidateWindowAllowed_ = true;
+    candidateUIId_ = TF_INVALID_UIELEMENTID;
+    publishedCandidates_.clear();
+    publishedHighlight_ = -1;
+    ComPtr<ITfUIElementMgr> uiMgr;
+    if (threadMgr_ && SUCCEEDED(threadMgr_.As(&uiMgr))) {
+        if (!candidateUI_) candidateUI_.Attach(new CandidateListUI(this));
+        BOOL show = TRUE;
+        DWORD id = TF_INVALID_UIELEMENTID;
+        // 先問程式要不要自己畫候選字（UI-less）：pbShow 回 FALSE 就不顯示我們的候選窗。
+        if (SUCCEEDED(uiMgr->BeginUIElement(candidateUI_.Get(), &show, &id))) {
+            candidateUIId_ = id;
+            candidateWindowAllowed_ = show != FALSE;
+        }
+    }
+    // 程式以「只用 UI-less」啟用 TSF 時，一定由程式自己畫。
+    if (activateFlags_ & TF_TMAE_UIELEMENTENABLEDONLY) candidateWindowAllowed_ = false;
+}
+
+void TextService::publishCandidateUI(bool opened) {
+    if (!candidateUI_ || candidateUIId_ == TF_INVALID_UIELEMENTID) return;
+    std::vector<std::wstring> items;
+    int highlighted = 0, perPage = 9;
+    if (!candidateSnapshot(items, highlighted, perPage)) return;
+    DWORD flags = 0;
+    if (opened || items != publishedCandidates_) {
+        flags = TF_CLUIE_DOCUMENTMGR | TF_CLUIE_COUNT | TF_CLUIE_SELECTION | TF_CLUIE_STRING | TF_CLUIE_PAGEINDEX | TF_CLUIE_CURRENTPAGE;
+    } else if (highlighted != publishedHighlight_) {
+        flags = TF_CLUIE_SELECTION;
+        if (publishedHighlight_ < 0 || highlighted / perPage != publishedHighlight_ / perPage) flags |= TF_CLUIE_CURRENTPAGE;
+    }
+    publishedCandidates_ = std::move(items);
+    publishedHighlight_ = highlighted;
+    if (!flags) return;
+    candidateUI_->markUpdated(flags);
+    ComPtr<ITfUIElementMgr> uiMgr;
+    if (threadMgr_ && SUCCEEDED(threadMgr_.As(&uiMgr))) uiMgr->UpdateUIElement(candidateUIId_);
+}
+
+void TextService::closeCandidateUI() {
+    if (candidateWindow_) candidateWindow_->hide();
+    unadviseLayoutSink();
+    if (candidateUIOpen_ && candidateUIId_ != TF_INVALID_UIELEMENTID) {
+        ComPtr<ITfUIElementMgr> uiMgr;
+        if (threadMgr_ && SUCCEEDED(threadMgr_.As(&uiMgr))) uiMgr->EndUIElement(candidateUIId_);
+    }
+    candidateUIOpen_ = false;
+    candidateUIId_ = TF_INVALID_UIELEMENTID;
+    candidateWindowAllowed_ = true;
+    publishedCandidates_.clear();
+    publishedHighlight_ = -1;
+}
+
+RECT TextService::candidateAnchor(TfEditCookie ec, ITfContext* context) {
+    RECT rect{};
+    if (composition_ && session_ && context) {
+        if (const auto candidate = session_->candidateRange()) {
+            const std::string marked = session_->markedText();
+            const auto start = static_cast<LONG>(utf8::utf16Offset(marked, static_cast<std::size_t>(candidate->first)));
+            const auto end = static_cast<LONG>(utf8::utf16Offset(marked, static_cast<std::size_t>(candidate->second)));
+            ComPtr<ITfRange> range;
+            ComPtr<ITfContextView> view;
+            if (SUCCEEDED(composition_->GetRange(&range)) && SUCCEEDED(context->GetActiveView(&view))) {
+                if (const auto part = subRange(ec, range.Get(), start, end)) {
+                    BOOL clipped = FALSE;
+                    // 版面還沒排好時會回傳 TS_E_NOLAYOUT；排好後 OnLayoutChange 會再放一次。
+                    if (SUCCEEDED(view->GetTextExt(ec, part.Get(), &rect, &clipped)) && (rect.right > rect.left || rect.bottom > rect.top)) {
+                        return rect;
+                    }
+                }
+            }
+        }
+    }
+    // 拿不到文字的位置：用系統游標，再不行就用滑鼠位置。
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetGUIThreadInfo(GetCurrentThreadId(), &info) && info.hwndCaret) {
+        rect = info.rcCaret;
+        MapWindowPoints(info.hwndCaret, nullptr, reinterpret_cast<POINT*>(&rect), 2);
+        return rect;
+    }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    return RECT{cursor.x, cursor.y, cursor.x + 1, cursor.y + 20};
+}
+
+HWND TextService::candidateOwner(ITfContext* context) const {
+    HWND hwnd = nullptr;
+    ComPtr<ITfContextView> view;
+    if (context && SUCCEEDED(context->GetActiveView(&view))) view->GetWnd(&hwnd);
+    if (!hwnd) hwnd = GetFocus();
+    if (hwnd) hwnd = GetAncestor(hwnd, GA_ROOT);
+    // 別的執行緒的視窗不能當擁有者：會把兩個執行緒的輸入佇列綁在一起。
+    if (hwnd && GetWindowThreadProcessId(hwnd, nullptr) != GetCurrentThreadId()) hwnd = nullptr;
+    return hwnd;
+}
+
+void TextService::adviseLayoutSink(ITfContext* context) {
+    if (!context || layoutContext_.Get() == context) return;
+    unadviseLayoutSink();
+    ComPtr<ITfSource> source;
+    DWORD cookie = TF_INVALID_COOKIE;
+    if (SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&source))) &&
+        SUCCEEDED(source->AdviseSink(IID_ITfTextLayoutSink, static_cast<ITfTextLayoutSink*>(this), &cookie))) {
+        layoutContext_ = context;
+        layoutSinkCookie_ = cookie;
+    }
+}
+
+void TextService::unadviseLayoutSink() {
+    if (layoutContext_ && layoutSinkCookie_ != TF_INVALID_COOKIE) {
+        ComPtr<ITfSource> source;
+        if (SUCCEEDED(layoutContext_.As(&source))) source->UnadviseSink(layoutSinkCookie_);
+    }
+    layoutContext_.Reset();
+    layoutSinkCookie_ = TF_INVALID_COOKIE;
+}
+
+STDMETHODIMP TextService::OnLayoutChange(ITfContext* context, TfLayoutCode code, ITfContextView*) {
+    return guarded([&]() -> HRESULT {
+        if (code == TF_LC_DESTROY || !context || context != compositionContext_.Get() || !candidateWindow_ || !candidateWindow_->isShown()) {
+            return S_OK;
+        }
+        // 版面改變（例如 Chrome、Word 晚一步排好版）：在唯讀的 edit session 裡重新取位置。
+        const ComPtr<TextService> self(this);
+        const ComPtr<ITfContext> target(context);
+        requestEditSession(context, clientId_, TF_ES_ASYNCDONTCARE | TF_ES_READ, [self, target](TfEditCookie ec) {
+            self->repositionCandidates(ec, target.Get());
+            return S_OK;
+        });
+        return S_OK;
+    });
+}
+
+void TextService::repositionCandidates(TfEditCookie ec, ITfContext* context) {
+    if (context != compositionContext_.Get() || !candidateWindow_ || !candidateWindow_->isShown()) return;
+    const RECT anchor = candidateAnchor(ec, context);
+    if (EqualRect(&anchor, &candidateAnchor_)) return;
+    candidateAnchor_ = anchor;
+    candidateWindow_->move(anchor);
+}
+
+void TextService::onCandidateClicked(int row) {
+    guarded([&]() -> HRESULT {
+        if (!session_ || !session_->candidateList() || !engine_) return S_OK;
+        const int index = session_->candidateList()->pageRange().first + row;
+        {
+            std::lock_guard lock(engine_->mutex);
+            if (!session_->chooseCandidate(index)) return S_OK;
+        }
+        if (activeContext_) requestUpdate(activeContext_.Get());
+        return S_OK;
+    });
+}
+
+// MARK: - CandidateListHost（UI-less）
+
+bool TextService::candidateSnapshot(std::vector<std::wstring>& items, int& highlighted, int& perPage) {
+    items.clear();
+    if (!session_ || !session_->candidateList()) return false;
+    const CandidateList& list = *session_->candidateList();
+    for (const auto& candidate : list.items) items.push_back(utf8::toWide(candidate.displayText()));
+    highlighted = list.highlighted;
+    perPage = list.perPage;
+    return true;
+}
+
+HRESULT TextService::candidateDocumentMgr(ITfDocumentMgr** documentMgr) {
+    *documentMgr = nullptr;
+    const ComPtr<ITfContext> context = compositionContext_ ? compositionContext_ : activeContext_;
+    return context ? context->GetDocumentMgr(documentMgr) : E_FAIL;
+}
+
+void TextService::candidateShowRequested(bool show) {
+    candidateWindowAllowed_ = show;
+    if (!show) {
+        if (candidateWindow_) candidateWindow_->hide();
+        return;
+    }
+    if (!candidateUIOpen_ || !session_ || !session_->candidateList()) return;
+    if (!candidateWindow_) {
+        candidateWindow_ = std::make_unique<CandidateWindow>();
+        candidateWindow_->setClickHandler([this](int row) { onCandidateClicked(row); });
+    }
+    candidateWindow_->show(currentCandidatePage(), candidateAnchor_, candidateOwner_);
+    adviseLayoutSink(compositionContext_.Get());
+}
+
+bool TextService::candidateWindowShown() {
+    return candidateWindow_ && candidateWindow_->isShown();
+}
+
+HRESULT TextService::candidateHighlight(int index) {
+    if (!session_ || !engine_) return E_FAIL;
+    {
+        std::lock_guard lock(engine_->mutex);
+        if (!session_->highlightCandidate(index)) return E_INVALIDARG;
+    }
+    if (activeContext_) requestUpdate(activeContext_.Get());
+    return S_OK;
+}
+
+HRESULT TextService::candidateFinalize() {
+    if (!session_ || !engine_ || !session_->candidateList()) return E_FAIL;
+    {
+        std::lock_guard lock(engine_->mutex);
+        session_->chooseCandidate(session_->candidateList()->highlighted);
+    }
+    if (activeContext_) requestUpdate(activeContext_.Get());
+    return S_OK;
+}
+
+HRESULT TextService::candidateAbort() {
+    if (!session_ || !engine_ || !session_->candidateList()) return E_FAIL;
+    {
+        std::lock_guard lock(engine_->mutex);
+        session_->handle(KeyEvent::of(KeyEvent::Type::Escape));  // 候選窗開著時，Esc 只關閉候選窗
+    }
+    if (activeContext_) requestUpdate(activeContext_.Get());
+    return S_OK;
 }
 
 }  // namespace bangbang
