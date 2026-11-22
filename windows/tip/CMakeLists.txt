@@ -15,6 +15,8 @@ add_library(BangbangZhuyin SHARED
     CandidateRenderer.h CandidateRenderer.cpp
     CandidateWindow.h CandidateWindow.cpp
     CandidateListUI.h CandidateListUI.cpp
+    ShiftTapDetector.h
+    InputModeButton.h InputModeButton.cpp
     TextService.h TextService.cpp)
 target_include_directories(BangbangZhuyin PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(BangbangZhuyin PRIVATE bangbang_engine bangbang_options ole32 oleaut32 uuid advapi32 shell32 user32

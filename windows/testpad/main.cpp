@@ -10,6 +10,7 @@
 //   testpad.exe --render-candidates <資料夾>
 //                            把幾種候選窗內容畫成 PNG（淺色／深色、100%／150%），檢查外觀用，不需要輸入法。
 #include <windows.h>
+#include <ctffunc.h>
 #include <msctf.h>
 #include <richedit.h>
 #include <wincodec.h>
@@ -168,6 +169,10 @@ std::optional<UINT> virtualKeyFor(char c) {
 ///   <?list>   候選字的 UI 元件內容（數量、每一個字、反白、頁碼）和引擎相同
 ///   <?uiless> 這一題扮演自己畫候選字的程式（BeginUIElement 回答不要輸入法畫）
 ///   <?ui-select:N>、<?ui-finalize>、<?ui-abort>  透過 ITfCandidateListUIElementBehavior 操作
+/// 中英切換（第 5 階段）：
+///   <shift>   單按 Shift　　<shift-down>、<shift-up>  分開按下、放開　　<click>  按一下滑鼠（Shift＋點選）
+///   <?mode:zh>、<?mode:en>  這個程式與全域都是中文／英文　　<?mode:en-local>  只有這個程式是英文
+///   <?set-open:0|1>  扮演程式關掉／打開輸入法　　<?lbi-click>  點工作列的「中／英」圖示
 std::vector<ScriptKey> parseKeys(std::string_view script) {
     using T = KeyEvent::Type;
     static const std::map<std::string, std::pair<UINT, T>> specials = {
@@ -185,6 +190,8 @@ std::vector<ScriptKey> parseKeys(std::string_view script) {
             i = close + 1;
             if (!name.empty() && name[0] == '?') {
                 keys.push_back({0, false, KeyEvent{}, label, name.substr(1)});
+            } else if (name == "shift" || name == "shift-down" || name == "shift-up" || name == "click") {
+                keys.push_back({0, false, KeyEvent{}, label, "!" + name});  // 動作：見 runSelfTest
             } else if (const auto it = specials.find(name); it != specials.end()) {
                 keys.push_back({it->second.first, false, KeyEvent::of(it->second.second), label});
             } else if (name.size() == 4 && name.rfind("num", 0) == 0) {
@@ -245,6 +252,28 @@ bool sendKey(ITfKeystrokeMgr* keystrokes, const ScriptKey& key) {
 
     state[VK_SHIFT] = state[VK_LSHIFT] = 0;
     SetKeyboardState(state);
+    return eaten != FALSE;
+}
+
+/// 送出 Shift 的按下或放開（中英切換用）。回傳輸入法有沒有吃掉（Shift 應該永遠交給程式）。
+bool sendShift(ITfKeystrokeMgr* keystrokes, bool down) {
+    BYTE state[256] = {};
+    GetKeyboardState(state);
+    state[VK_SHIFT] = state[VK_LSHIFT] = down ? 0x80 : 0;
+    state[VK_RSHIFT] = 0;
+    SetKeyboardState(state);
+    const UINT scan = MapVirtualKeyW(VK_LSHIFT, MAPVK_VK_TO_VSC);
+    LPARAM lParam = 1 | (static_cast<LPARAM>(scan) << 16);
+    BOOL eaten = FALSE;
+    if (down) {
+        keystrokes->TestKeyDown(VK_SHIFT, lParam, &eaten);
+        if (eaten) keystrokes->KeyDown(VK_SHIFT, lParam, &eaten);
+    } else {
+        lParam |= (static_cast<LPARAM>(1) << 30) | static_cast<LPARAM>(static_cast<ULONG_PTR>(1) << 31);
+        keystrokes->TestKeyUp(VK_SHIFT, lParam, &eaten);
+        if (eaten) keystrokes->KeyUp(VK_SHIFT, lParam, &eaten);
+    }
+    pumpMessages();
     return eaten != FALSE;
 }
 
@@ -454,43 +483,167 @@ void checkCandidateList(ITfUIElementMgr* uiMgr, const UIElementSink& sink, const
     }
 }
 
-/// 執行腳本裡的一個檢查或操作（<?…>）；操作會同時套用到輸入法與引擎（標準答案）。
-void runCheck(const std::string& check, HWND window, HWND target, ITfUIElementMgr* uiMgr, UIElementSink& sink, InputSession& oracle,
-              std::string& problems) {
+// MARK: - 中英切換的檢查
+
+/// 一題測試的狀態：測試用的 TSF 物件，以及輸入法以外算出來的標準答案（引擎、中英模式）。
+struct TestRun {
+    HWND window = nullptr;
+    HWND target = nullptr;
+    ITfThreadMgr* threadMgr = nullptr;
+    TfClientId client = TF_CLIENTID_NULL;
+    ITfKeystrokeMgr* keystrokes = nullptr;
+    ITfUIElementMgr* uiMgr = nullptr;
+    UIElementSink* sink = nullptr;
+    InputSession* oracle = nullptr;
+    std::string expectedCommits;
+    /// 標準答案：這個程式目前是不是中文、全域是不是中文、Shift 按著而且還可能是一次單按。
+    bool chinese = true;
+    bool globalChinese = true;
+    bool shiftPending = false;
+    std::string problems;
+
+    /// 標準答案切換這個程式的中英（切到英文前先送出組字區）。
+    void setChinese(bool value) {
+        if (chinese && !value && oracle->isComposing()) expectedCommits += oracle->commitAll();
+        chinese = value;
+    }
+};
+
+HRESULT writeCompartment(IUnknown* owner, TfClientId client, REFGUID guid, LONG value) {
+    ComPtr<ITfCompartmentMgr> compartments;
+    ComPtr<ITfCompartment> compartment;
+    if (FAILED(owner->QueryInterface(IID_PPV_ARGS(&compartments))) || FAILED(compartments->GetCompartment(guid, &compartment))) return E_FAIL;
+    VARIANT variant;
+    VariantInit(&variant);
+    variant.vt = VT_I4;
+    variant.lVal = value;
+    return compartment->SetValue(client, &variant);
+}
+
+ComPtr<ITfCompartmentMgr> globalCompartments(ITfThreadMgr* threadMgr) {
+    ComPtr<ITfCompartmentMgr> global;
+    threadMgr->GetGlobalCompartment(&global);
+    return global;
+}
+
+ComPtr<ITfLangBarItemButton> modeButton(ITfThreadMgr* threadMgr) {
+    ComPtr<ITfLangBarItemMgr> langBar;
+    ComPtr<ITfLangBarItem> item;
+    ComPtr<ITfLangBarItemButton> button;
+    if (SUCCEEDED(threadMgr->QueryInterface(IID_PPV_ARGS(&langBar))) && SUCCEEDED(langBar->GetItem(GUID_LBI_INPUTMODE, &item))) item.As(&button);
+    return button;
+}
+
+/// 每一題開始前切回中文：扮演程式把全域狀態與這個程式的輸入法開關都設成中文。
+void forceChinese(TestRun& run) {
+    if (const auto global = globalCompartments(run.threadMgr)) writeCompartment(global.Get(), run.client, kChineseModeCompartment, 1);
+    writeCompartment(run.threadMgr, run.client, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, 1);
+    pumpMessages();
+    run.chinese = run.globalChinese = true;
+    run.shiftPending = false;
+}
+
+/// <?mode:zh|en|en-local>：輸入法開關、轉換模式、全域狀態、工作列圖示都要符合。
+void checkMode(const std::string& expect, TestRun& run) {
+    const bool threadChinese = expect == "zh";
+    const bool globalChinese = expect != "en";
+    if (run.chinese != threadChinese || run.globalChinese != globalChinese) run.problems += "  （腳本錯誤）標準答案的中英狀態和 <?mode:" + expect + "> 不同\n";
+    const CompartmentValue open = readCompartment(run.threadMgr, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE);
+    const CompartmentValue conversion = readCompartment(run.threadMgr, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION);
+    if (open.type != VT_I4 || (open.value != 0) != threadChinese) {
+        run.problems += "  輸入法開關是 " + std::to_string(open.value) + "（型別 " + std::to_string(open.type) + "），應為 " + (threadChinese ? "1" : "0") + "\n";
+    }
+    if (conversion.type != VT_I4 || ((conversion.value & TF_CONVERSIONMODE_NATIVE) != 0) != threadChinese) {
+        run.problems += "  轉換模式是 " + std::to_string(conversion.value) + "（型別 " + std::to_string(conversion.type) + "），應為" +
+                        (threadChinese ? "中文" : "英數") + "\n";
+    }
+    CompartmentValue global;
+    if (const auto compartments = globalCompartments(run.threadMgr)) global = readCompartment(compartments.Get(), kChineseModeCompartment);
+    if ((global.type != VT_I4 || global.value != 0) != globalChinese) run.problems += std::string("  全域狀態應為") + (globalChinese ? "中文" : "英文") + "\n";
+    const auto button = modeButton(run.threadMgr);
+    BSTR text = nullptr;
+    if (!button || FAILED(button->GetText(&text)) || !text) {
+        run.problems += "  找不到工作列的「中／英」圖示（GUID_LBI_INPUTMODE）\n";
+    } else {
+        const std::string shown = utf8::fromWide(std::wstring(text, SysStringLen(text)));
+        SysFreeString(text);
+        if (shown != (threadChinese ? "中" : "英")) run.problems += "  工作列圖示是「" + shown + "」\n";
+    }
+}
+
+/// 執行腳本裡的一個動作（<shift>…）或檢查（<?…>）；操作會同時套用到輸入法與標準答案。
+void runStep(const ScriptKey& key, TestRun& run) {
+    const std::string& check = key.check;
+    if (check == "!shift" || check == "!shift-down") {
+        if (sendShift(run.keystrokes, true)) run.problems += "  Shift 按下被輸入法吃掉了\n";
+        run.shiftPending = true;
+        if (check == "!shift-down") return;
+    }
+    if (check == "!shift" || check == "!shift-up") {
+        if (sendShift(run.keystrokes, false)) run.problems += "  Shift 放開被輸入法吃掉了\n";
+        if (run.shiftPending) {
+            run.setChinese(!run.chinese);  // 單按 Shift：以這個程式目前的狀態切換，並改變全域狀態
+            run.globalChinese = run.chinese;
+        }
+        run.shiftPending = false;
+        return;
+    }
+    if (check == "!click") {
+        // 按住 Shift 點一下（選取文字）：滑鼠訊息經過輸入法的訊息掛鉤。
+        PostMessageW(run.target, WM_LBUTTONDOWN, MK_LBUTTON | MK_SHIFT, MAKELPARAM(2, 2));
+        PostMessageW(run.target, WM_LBUTTONUP, MK_SHIFT, MAKELPARAM(2, 2));
+        pumpMessages();
+        run.shiftPending = false;
+        return;
+    }
     if (check == "cand") {
-        checkCandidateShown(window, target, problems);
+        checkCandidateShown(run.window, run.target, run.problems);
     } else if (check == "nocand") {
-        checkCandidateHidden(problems);
+        checkCandidateHidden(run.problems);
     } else if (check == "list") {
-        checkCandidateList(uiMgr, sink, oracle, problems);
+        checkCandidateList(run.uiMgr, *run.sink, *run.oracle, run.problems);
     } else if (check == "uiless") {
-        sink.drawItself = true;
+        run.sink->drawItself = true;
+    } else if (check.rfind("mode:", 0) == 0) {
+        checkMode(check.substr(5), run);
+    } else if (check.rfind("set-open:", 0) == 0) {
+        const bool open = check.substr(9) != "0";
+        writeCompartment(run.threadMgr, run.client, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, open ? 1 : 0);
+        pumpMessages();
+        run.setChinese(open);  // 程式自己打開／關掉輸入法：只影響這個程式
+    } else if (check == "lbi-click") {
+        const auto button = modeButton(run.threadMgr);
+        RECT area{};
+        if (!button || FAILED(button->OnClick(TF_LBI_CLK_LEFT, POINT{0, 0}, &area))) run.problems += "  無法點工作列的「中／英」圖示\n";
+        pumpMessages();
+        run.setChinese(!run.chinese);
+        run.globalChinese = run.chinese;
     } else if (check.rfind("ui-", 0) == 0) {
-        const auto element = candidateElement(uiMgr, sink);
+        const auto element = candidateElement(run.uiMgr, *run.sink);
         if (!element) {
-            problems += "  找不到候選字的 UI 元件，無法執行 " + check + "\n";
+            run.problems += "  找不到候選字的 UI 元件，無法執行 " + check + "\n";
             return;
         }
         HRESULT hr = E_FAIL;
         if (check.rfind("ui-select:", 0) == 0) {
             const int index = std::atoi(check.c_str() + 10);
             hr = element->SetSelection(static_cast<UINT>(index));
-            oracle.highlightCandidate(index);
+            run.oracle->highlightCandidate(index);
         } else if (check == "ui-finalize") {
             hr = element->Finalize();
-            if (oracle.candidateList()) oracle.chooseCandidate(oracle.candidateList()->highlighted);
+            if (run.oracle->candidateList()) run.oracle->chooseCandidate(run.oracle->candidateList()->highlighted);
         } else if (check == "ui-abort") {
             hr = element->Abort();
-            oracle.handle(KeyEvent::of(KeyEvent::Type::Escape));
+            run.oracle->handle(KeyEvent::of(KeyEvent::Type::Escape));
         }
         if (FAILED(hr)) {
             char code[16];
             std::snprintf(code, sizeof(code), "%08lX", static_cast<unsigned long>(hr));
-            problems += "  " + check + " 失敗（0x" + code + "）\n";
+            run.problems += "  " + check + " 失敗（0x" + code + "）\n";
         }
         pumpMessages();
     } else {
-        problems += "  （腳本錯誤）不認得的檢查 <?" + check + ">\n";
+        run.problems += "  （腳本錯誤）不認得的檢查 <?" + check + ">\n";
     }
 }
 
@@ -533,6 +686,16 @@ std::vector<TestCase> testCases() {
         {"括號配對：在組字區換括號", "<S-[>5j/ <S-]><home><down><?list>2<?nocand>"},
         {"UI-less：程式自己畫，輸入法不顯示候選窗", "<?uiless>5j/ jp6<down><?nocand><?list><?ui-select:1><?list><?ui-finalize><?nocand>"},
         {"UI-less：Abort 關閉候選字", "<?uiless>5j/ jp6<down><?ui-abort><?nocand><enter>"},
+        // 中英切換（第 5 階段）
+        {"單按 Shift 切到英文，按鍵全部交還", "<?mode:zh><shift><?mode:en>su3<enter><bs><shift><?mode:zh>"},
+        {"組字中單按 Shift：先送出組字區再切到英文", "su3cl3<shift><?mode:en>a<shift><?mode:zh>"},
+        {"英文模式下再單按 Shift 切回中文", "<shift><shift><?mode:zh>su3<enter>"},
+        {"Shift＋字母不會切換", "<shift-down>A<shift-up><?mode:zh>su3<enter>"},
+        {"按住 Shift 點滑鼠不會切換", "<shift-down><click><shift-up><?mode:zh>su3<enter>"},
+        {"候選窗開著時單按 Shift：送出並關閉候選窗", "5j/ jp6<down><?cand><shift><?nocand><?mode:en><shift>"},
+        {"程式自己關掉輸入法：只有這個程式變英文", "<?set-open:0><?mode:en-local>su3<?set-open:1><?mode:zh>su3<enter>"},
+        {"程式關掉輸入法後單按 Shift：切回中文", "<?set-open:0><shift><?mode:zh>su3<enter>"},
+        {"點工作列的「中／英」圖示切換", "<?lbi-click><?mode:en>su3<?lbi-click><?mode:zh>su3<enter>"},
     };
 }
 
@@ -588,25 +751,32 @@ int runSelfTest(const std::filesystem::path& modelPath) {
         std::printf("（無法註冊 ITfUIElementSink，候選字的 UI 元件檢查會失敗）\n");
     }
 
+    // 測試會切換所有程式共用的中英狀態：先記下來，測完還原。
+    TfClientId client = TF_CLIENTID_NULL;
+    threadMgr->Activate(&client);
+    const ComPtr<ITfCompartmentMgr> global = globalCompartments(threadMgr.Get());
+    const CompartmentValue initialGlobal = global ? readCompartment(global.Get(), kChineseModeCompartment) : CompartmentValue{};
+    TestRun base;
+    base.window = window;
+    base.target = target;
+    base.threadMgr = threadMgr.Get();
+    base.client = client;
+    base.keystrokes = keystrokes.Get();
+    base.uiMgr = uiMgr.Get();
+    base.sink = sink.Get();
+    forceChinese(base);
+
     int passed = 0, failed = 0, skipped = 0;
-    // 啟用後應該回報「開啟、中文模式」：工作列的輸入模式圖示、IMM32 程式看到的開關狀態都讀這兩個值。
+    // 啟用後應該回報「開啟、中文模式」：IMM32 程式看到的開關狀態與轉換模式都讀這兩個值。
     if (g_probeCompartments) probeCompartments(threadMgr.Get());
     const CompartmentValue open = readCompartment(threadMgr.Get(), GUID_COMPARTMENT_KEYBOARD_OPENCLOSE);
     const CompartmentValue conversion = readCompartment(threadMgr.Get(), GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION);
-    // 轉換模式是已知問題：測試視窗在前景時，事後讀到的常是 VT_EMPTY（輸入法設定時回傳 S_OK），
-    // 第 5 階段加上 compartment 事件通知、找出原因後，再改回必須是中文才算通過。
-    const bool nativeMode = conversion.type == VT_I4 && (conversion.value & TF_CONVERSIONMODE_NATIVE) != 0;
-    if (open.type == VT_I4 && open.value == 1) {
+    if (open.type == VT_I4 && open.value == 1 && conversion.type == VT_I4 && (conversion.value & TF_CONVERSIONMODE_NATIVE) != 0) {
         ++passed;
-        if (nativeMode) {
-            std::printf("✓ 輸入模式：開啟、中文\n");
-        } else {
-            std::printf("✓ 輸入模式：開啟（轉換模式 0x%lX、型別 %u，沒有保持中文：已知問題，第 5 階段處理）\n",
-                        static_cast<unsigned long>(conversion.value), static_cast<unsigned>(conversion.type));
-        }
+        std::printf("✓ 輸入模式：開啟、中文\n");
     } else {
         ++failed;
-        std::printf("✗ 輸入模式：開關 %ld（型別 %u）、轉換模式 0x%lX（型別 %u），應為開啟\n", static_cast<long>(open.value),
+        std::printf("✗ 輸入模式：開關 %ld（型別 %u）、轉換模式 0x%lX（型別 %u），應為開啟、含中文 0x1\n", static_cast<long>(open.value),
                     static_cast<unsigned>(open.type), static_cast<unsigned long>(conversion.value), static_cast<unsigned>(conversion.type));
     }
     for (const auto& test : testCases()) {
@@ -617,25 +787,34 @@ int runSelfTest(const std::filesystem::path& modelPath) {
             continue;
         }
         InputSession oracle(lm);
-        std::string expectedCommits;
-        std::string problems;
+        TestRun run = base;
+        run.oracle = &oracle;
+        forceChinese(run);
         sink->drawItself = false;
         for (const auto& key : parseKeys(test.keys)) {
             if (!key.check.empty()) {
-                runCheck(key.check, window, target, uiMgr.Get(), *sink.Get(), oracle, problems);
+                runStep(key, run);
+                continue;
+            }
+            run.shiftPending = false;  // Shift 按著時按了別的鍵
+            if (!run.chinese) {
+                // 英文模式：輸入法不吃任何鍵（testpad 不會再把鍵送給 RichEdit，所以文件不變）。
+                if (sendKey(keystrokes.Get(), key)) run.problems += "  英文模式下按鍵 " + key.label + " 被輸入法吃掉了\n";
                 continue;
             }
             const SessionOutput out = oracle.handle(key.event);
-            expectedCommits += out.commit;
+            run.expectedCommits += out.commit;
             const bool eaten = sendKey(keystrokes.Get(), key);
             if (eaten != out.handled) {
-                problems += "  按鍵 " + key.label + "：輸入法" + (eaten ? "吃掉了" : "沒有吃掉") + "，引擎" + (out.handled ? "會處理" : "不處理") + "\n";
+                run.problems += "  按鍵 " + key.label + "：輸入法" + (eaten ? "吃掉了" : "沒有吃掉") + "，引擎" + (out.handled ? "會處理" : "不處理") + "\n";
             }
         }
-        const std::string expected = expectedCommits + (oracle.isComposing() ? oracle.markedText() : "");
+        const std::string expected = run.expectedCommits + (oracle.isComposing() ? oracle.markedText() : "");
         const std::string actual = windowText(target);
+        std::string problems = run.problems;
         if (actual != expected) problems += "  文件內容：「" + actual + "」，應為「" + expected + "」\n";
-        // 結束這一題：輸入法還在組字的話按 Esc 清掉（候選窗、注音、組字區各要一次）。
+        // 結束這一題：回到中文，輸入法還在組字的話按 Esc 清掉（候選窗、注音、組字區各要一次）。
+        forceChinese(run);
         if (oracle.isComposing()) {
             const ScriptKey escape = parseKeys("<esc>").front();
             for (int i = 0; i < 3; ++i) sendKey(keystrokes.Get(), escape);
@@ -658,11 +837,110 @@ int runSelfTest(const std::filesystem::path& modelPath) {
     } else {
         std::printf("通過 %d 項，失敗 %d 項\n", passed, failed);
     }
+    // 還原測試前的中英狀態（所有程式共用）。
+    if (global) {
+        if (initialGlobal.type == VT_I4) {
+            writeCompartment(global.Get(), client, kChineseModeCompartment, initialGlobal.value);
+        } else {
+            global->ClearCompartment(client, kChineseModeCompartment);
+        }
+        pumpMessages();
+    }
+    threadMgr->Deactivate();
     if (source && sinkCookie != TF_INVALID_COOKIE) source->UnadviseSink(sinkCookie);
     DestroyWindow(window);
     pumpMessages();
     if (failed > 0) return 1;
     return skipped > 0 ? 3 : 0;
+}
+
+// MARK: - 全域 compartment 診斷
+
+/// 診斷用的全域 compartment（和輸入法用的分開）：{0043C68D-311D-4E54-963F-4A87807219B4}
+constexpr GUID kProbeGlobalCompartment = {0x0043c68d, 0x311d, 0x4e54, {0x96, 0x3f, 0x4a, 0x87, 0x80, 0x72, 0x19, 0xb4}};
+
+class CompartmentWatcher final : public ITfCompartmentEventSink {
+public:
+    explicit CompartmentWatcher(ITfCompartment* compartment) : compartment_(compartment) {}
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (!IsEqualIID(riid, IID_IUnknown) && !IsEqualIID(riid, IID_ITfCompartmentEventSink)) return E_NOINTERFACE;
+        *ppv = static_cast<ITfCompartmentEventSink*>(this);
+        AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ++references_; }
+    STDMETHODIMP_(ULONG) Release() override {
+        const ULONG remaining = --references_;
+        if (remaining == 0) delete this;
+        return remaining;
+    }
+    STDMETHODIMP OnChange(REFGUID) override {
+        const CompartmentValue v = readCompartmentValue();
+        std::printf("通知：值變成 %ld（型別 %u）\n", static_cast<long>(v.value), static_cast<unsigned>(v.type));
+        std::fflush(stdout);
+        return S_OK;
+    }
+    CompartmentValue readCompartmentValue() const {
+        CompartmentValue result;
+        VARIANT value;
+        VariantInit(&value);
+        if (SUCCEEDED(compartment_->GetValue(&value))) {
+            result.type = value.vt;
+            if (value.vt == VT_I4) result.value = value.lVal;
+        }
+        VariantClear(&value);
+        return result;
+    }
+
+private:
+    ULONG references_ = 1;
+    ComPtr<ITfCompartment> compartment_;
+};
+
+/// --probe-global set <值> | get | watch <秒>：全域 compartment 是否跨程式共用、改了會不會通知別的程式。
+int probeGlobal(const std::wstring& action, int argument) {
+    ComPtr<ITfThreadMgr> threadMgr;
+    TfClientId client = TF_CLIENTID_NULL;
+    ComPtr<ITfCompartmentMgr> global;
+    ComPtr<ITfCompartment> compartment;
+    if (FAILED(CoCreateInstance(CLSID_TF_ThreadMgr, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&threadMgr))) ||
+        FAILED(threadMgr->Activate(&client)) || FAILED(threadMgr->GetGlobalCompartment(&global)) ||
+        FAILED(global->GetCompartment(kProbeGlobalCompartment, &compartment))) {
+        std::printf("無法取得全域 compartment\n");
+        return 2;
+    }
+    ComPtr<CompartmentWatcher> watcher;
+    watcher.Attach(new CompartmentWatcher(compartment.Get()));
+    if (action == L"set") {
+        VARIANT value;
+        VariantInit(&value);
+        value.vt = VT_I4;
+        value.lVal = argument;
+        std::printf("寫入 %d：0x%08lX\n", argument, static_cast<unsigned long>(compartment->SetValue(client, &value)));
+    } else if (action == L"get") {
+        const CompartmentValue v = watcher->readCompartmentValue();
+        std::printf("讀到 %ld（型別 %u）\n", static_cast<long>(v.value), static_cast<unsigned>(v.type));
+    } else if (action == L"watch") {
+        ComPtr<ITfSource> source;
+        DWORD cookie = TF_INVALID_COOKIE;
+        if (FAILED(compartment.As(&source)) || FAILED(source->AdviseSink(IID_ITfCompartmentEventSink, watcher.Get(), &cookie))) {
+            std::printf("無法註冊通知\n");
+            return 2;
+        }
+        std::printf("開始監看 %d 秒\n", argument);
+        std::fflush(stdout);
+        const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(argument) * 1000;
+        while (GetTickCount64() < end) {
+            pumpMessages();
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
+        }
+        source->UnadviseSink(cookie);
+        std::printf("結束監看\n");
+    }
+    threadMgr->Deactivate();
+    return 0;
 }
 
 // MARK: - 候選窗外觀（PNG）
@@ -765,6 +1043,13 @@ int wmain(int argc, wchar_t** argv) {
             g_probeCompartments = true;
         } else if (arg == L"--render-candidates" && i + 1 < argc) {
             renderFolder = argv[++i];
+        } else if (arg == L"--probe-global" && i + 1 < argc) {
+            const std::wstring action = argv[++i];
+            const int argument = i + 1 < argc ? _wtoi(argv[i + 1]) : 0;
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            const int code = probeGlobal(action, argument);
+            CoUninitialize();
+            return code;
         } else if (arg == L"--lm" && i + 1 < argc) {
             modelPath = argv[++i];
         }

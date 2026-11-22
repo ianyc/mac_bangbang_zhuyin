@@ -43,7 +43,8 @@ windows\out\build\x64\testpad\Debug\testpad.exe --selftest   # 自動測試：�
 windows\out\build\x64\testpad\Debug\testpad.exe --render-candidates <資料夾>   # 把候選窗樣本畫成 PNG，檢查外觀
 ```
 
-- 自動測試只在 testpad 自己的視窗裡啟用棒棒注音，不影響其他程式；需要先執行 `register.ps1`。也會檢查候選窗（是否顯示、位置、不搶焦點、UI 元件內容）與 UI-less 模式。
+- 自動測試只在 testpad 自己的視窗裡啟用棒棒注音；需要先執行 `register.ps1`。也會檢查候選窗（是否顯示、位置、不搶焦點、UI 元件內容）、UI-less 模式與中英切換。
+- 中英狀態是所有程式共用的：測試中會暫時切換它（其他程式也會跟著變），測完還原成測試前的狀態。
 - 按鍵要送到輸入法，測試視窗必須在前景。剛操作過電腦時，Windows 不讓背景程式搶焦點，這時按鍵測試會全部標成「略過」：請在自己的終端機執行，跑的時候不要動鍵盤滑鼠。
 
 ## 開發工具 bangbang-tool

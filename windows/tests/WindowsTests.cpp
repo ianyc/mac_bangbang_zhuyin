@@ -13,6 +13,7 @@
 
 #include "InputSession.h"
 #include "LanguageModel.h"
+#include "ShiftTapDetector.h"
 #include "TestSupport.h"
 #include "UserModel.h"
 #include "Utf8.h"
@@ -135,6 +136,66 @@ TEST(CandidateApiTests, IgnoresInvalidRequests) {
     EXPECT_FALSE(session.chooseCandidate(count));
     EXPECT_EQ(session.candidateList()->highlighted, 0);
     EXPECT_EQ(session.markedText(), "中文");
+}
+
+// MARK: - 單按 Shift（中英切換）
+
+namespace {
+constexpr unsigned kShift = ShiftTapDetector::kShift;
+constexpr unsigned kKeyA = 0x41;
+constexpr unsigned kControl = 0x11;
+}  // namespace
+
+TEST(ShiftTapTests, ShiftAloneIsATap) {
+    ShiftTapDetector d;
+    d.keyDown(kShift);
+    d.keyDown(kShift);  // 按住不放的自動重複
+    EXPECT_TRUE(d.keyUp(kShift));
+    // 放開之後回到初始狀態：同一個放開事件再送一次（訊息掛鉤和 TSF 各一次）不會再切一次。
+    EXPECT_FALSE(d.keyUp(kShift));
+}
+
+TEST(ShiftTapTests, ShiftWithOtherKeyIsNotATap) {
+    ShiftTapDetector d;
+    d.keyDown(kShift);
+    d.keyDown(kKeyA);  // Shift＋A
+    d.keyUp(kKeyA);
+    EXPECT_FALSE(d.keyUp(kShift));
+    // Ctrl＋Shift（切換鍵盤配置的快速鍵）也不算。
+    d.keyDown(kControl);
+    d.keyDown(kShift);
+    d.keyUp(kShift);
+    d.keyDown(kShift);
+    d.keyDown(kControl);
+    EXPECT_FALSE(d.keyUp(kShift));
+}
+
+TEST(ShiftTapTests, MouseClickWhileHoldingShiftIsNotATap) {
+    ShiftTapDetector d;
+    d.keyDown(kShift);
+    d.mouseDown();  // Shift＋點選來選取文字
+    EXPECT_FALSE(d.keyUp(kShift));
+    // 沒按 Shift 時點滑鼠，不影響下一次單按。
+    d.mouseDown();
+    d.keyDown(kShift);
+    EXPECT_TRUE(d.keyUp(kShift));
+}
+
+TEST(ShiftTapTests, LeftAndRightShiftCount) {
+    ShiftTapDetector d;
+    d.keyDown(ShiftTapDetector::kLeftShift);
+    EXPECT_TRUE(d.keyUp(ShiftTapDetector::kLeftShift));
+    d.keyDown(kShift);  // 同一次按下可能分別以 VK_SHIFT 與 VK_RSHIFT 送來
+    d.keyDown(ShiftTapDetector::kRightShift);
+    EXPECT_TRUE(d.keyUp(ShiftTapDetector::kRightShift));
+    EXPECT_FALSE(d.keyUp(kShift));
+}
+
+TEST(ShiftTapTests, ResetForgetsPendingShift) {
+    ShiftTapDetector d;
+    d.keyDown(kShift);
+    d.reset();  // 例如焦點換到別的程式
+    EXPECT_FALSE(d.keyUp(kShift));
 }
 
 // MARK: - BMP 以外的字元

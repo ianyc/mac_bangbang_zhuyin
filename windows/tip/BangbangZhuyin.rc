@@ -6,6 +6,12 @@
 // 輸入法圖示（鍵盤清單、工作列）。由 windows/scripts/make-icon.ps1 產生。
 IDI_BANGBANG ICON "BangbangZhuyin.ico"
 
+// 工作列的「中／英」輸入模式圖示（淺色工作列用黑字、深色工作列用白字）。也由 make-icon.ps1 產生。
+IDI_MODE_ZH_LIGHT ICON "mode-zh-light.ico"
+IDI_MODE_ZH_DARK ICON "mode-zh-dark.ico"
+IDI_MODE_EN_LIGHT ICON "mode-en-light.ico"
+IDI_MODE_EN_DARK ICON "mode-en-dark.ico"
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION BANGBANG_VERSION_MAJOR, BANGBANG_VERSION_MINOR, BANGBANG_VERSION_PATCH, 0
  PRODUCTVERSION BANGBANG_VERSION_MAJOR, BANGBANG_VERSION_MINOR, BANGBANG_VERSION_PATCH, 0

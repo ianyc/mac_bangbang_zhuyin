@@ -21,6 +21,10 @@ inline constexpr GUID kDisplayAttributeConverted = {0xbfe3fcd1, 0xe522, 0x41ed, 
 // 候選字的 UI 元件（UI-less 模式，ITfUIElement::GetGUID）：{17573891-EB5C-435B-AC57-DAB49E0B57E8}
 inline constexpr GUID kCandidateUIElementGuid = {0x17573891, 0xeb5c, 0x435b, {0xac, 0x57, 0xda, 0xb4, 0x9e, 0x0b, 0x57, 0xe8}};
 
+// 中英狀態（全域 compartment，所有程式共用）：{02E02754-731F-4895-8F8A-9883AC7AA3C0}
+// 值為 VT_I4：1 是中文、0 是英文；還沒有人設定過（VT_EMPTY）時當成中文。
+inline constexpr GUID kChineseModeCompartment = {0x02e02754, 0x731f, 0x4895, {0x8f, 0x8a, 0x98, 0x83, 0xac, 0x7a, 0xa3, 0xc0}};
+
 // 單按 Shift 切換中英的 preserved key：{C4EF4916-3C59-4D58-A368-75A1E1A389BD}
 inline constexpr GUID kPreservedKeyShiftToggle = {0xc4ef4916, 0x3c59, 0x4d58, {0xa3, 0x68, 0x75, 0xa1, 0xe1, 0xa3, 0x89, 0xbd}};
 

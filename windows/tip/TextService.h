@@ -15,11 +15,13 @@
 #include "CandidateListUI.h"
 #include "CandidateRenderer.h"
 #include "InputSession.h"
+#include "ShiftTapDetector.h"
 
 namespace bangbang {
 
 struct SharedEngine;
 class CandidateWindow;
+class InputModeButton;
 
 class TextService final : public ITfTextInputProcessorEx,
                           public ITfThreadMgrEventSink,
@@ -29,9 +31,15 @@ class TextService final : public ITfTextInputProcessorEx,
                           public ITfCompositionSink,
                           public ITfDisplayAttributeProvider,
                           public ITfTextLayoutSink,
+                          public ITfCompartmentEventSink,
                           private CandidateListHost {
 public:
     TextService();
+
+    /// 這個執行緒的訊息掛鉤收到的訊息（偵測單按 Shift、Shift＋滑鼠）。內部使用。
+    void onThreadMessage(const MSG& message);
+    /// 延後重新設定輸入模式的計時器到了。內部使用。
+    void onRepublishTimer();
 
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
@@ -75,6 +83,9 @@ public:
     // ITfTextLayoutSink：程式的版面改變（例如 Chrome 晚一步排好版）時，重新放候選窗。
     STDMETHODIMP OnLayoutChange(ITfContext* context, TfLayoutCode code, ITfContextView* view) override;
 
+    // ITfCompartmentEventSink：中英狀態（全域）、這個執行緒的輸入法開關與轉換模式被改變時。
+    STDMETHODIMP OnChange(REFGUID guid) override;
+
 private:
     ~TextService();
 
@@ -100,8 +111,25 @@ private:
     };
     KeyDecision decide(ITfContext* context, WPARAM wParam, LPARAM lParam) const;
 
-    /// 告訴系統輸入法目前開著、是中文模式（GUID_COMPARTMENT_KEYBOARD_OPENCLOSE 與 INPUTMODE_CONVERSION）。
+    /// 把這個執行緒目前的中英狀態寫到 GUID_COMPARTMENT_KEYBOARD_OPENCLOSE 與 INPUTMODE_CONVERSION。
     void publishInputMode();
+    /// 等程式的訊息迴圈下一輪再 publishInputMode：在某個 compartment 的變更通知裡不能改它（E_UNEXPECTED）。
+    void schedulePublishInputMode();
+
+    // 中英切換（第 5 階段）。全域 compartment kChineseModeCompartment 是所有程式共用的狀態。
+    Microsoft::WRL::ComPtr<ITfCompartment> compartment(REFGUID guid, bool global) const;
+    bool readGlobalMode() const;
+    /// 改變所有程式共用的中英狀態（單按 Shift、點工作列圖示）。這個執行緒馬上套用，其他程式收到通知後套用。
+    void setGlobalMode(bool chinese);
+    void toggleMode();
+    /// 只改這個執行緒：切到英文前先送出組字區，再更新 compartment 與工作列圖示。
+    void applyMode(bool chinese);
+    void adviseCompartmentSinks();
+    void unadviseCompartmentSinks();
+    void installMessageHook();
+    void removeMessageHook();
+    void onModeButtonClick(TfLBIClick click, POINT point);
+    void showModeMenu(POINT point);
     /// 送出整個組字區（切換應用程式、切換輸入法、按 Caps Lock 時）。
     void commitComposition();
     /// 要求一個 edit session，把引擎目前的狀態畫到文件上。
@@ -170,6 +198,19 @@ private:
     /// 註冊了 ITfTextLayoutSink 的文件。
     Microsoft::WRL::ComPtr<ITfContext> layoutContext_;
     DWORD layoutSinkCookie_ = TF_INVALID_COOKIE;
+
+    // 中英切換
+    /// 這個執行緒目前是不是中文模式（通常等於全域狀態；程式自己關掉輸入法時只有這個執行緒改變）。
+    bool chinese_ = true;
+    /// 正在寫自己的 compartment：忽略它們觸發的通知。
+    bool writingCompartments_ = false;
+    ShiftTapDetector shiftTap_;
+    HHOOK messageHook_ = nullptr;
+    UINT_PTR republishTimer_ = 0;
+    DWORD globalModeSinkCookie_ = TF_INVALID_COOKIE;
+    DWORD openCloseSinkCookie_ = TF_INVALID_COOKIE;
+    DWORD conversionSinkCookie_ = TF_INVALID_COOKIE;
+    Microsoft::WRL::ComPtr<InputModeButton> modeButton_;
 };
 
 }  // namespace bangbang

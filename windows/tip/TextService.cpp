@@ -2,11 +2,13 @@
 
 #include <mutex>
 
+#include "BangbangVersion.h"
 #include "CandidateWindow.h"
 #include "DisplayAttributes.h"
 #include "EditSession.h"
 #include "Globals.h"
 #include "Guids.h"
+#include "InputModeButton.h"
 #include "KeyMapping.h"
 #include "SharedEngine.h"
 #include "Utf8.h"
@@ -16,6 +18,59 @@ using Microsoft::WRL::ComPtr;
 namespace bangbang {
 
 namespace {
+
+/// 每個 UI 執行緒只有一個 TextService；訊息掛鉤與計時器用它找到該執行緒的 TextService。
+thread_local TextService* t_threadService = nullptr;
+
+/// 這個執行緒的訊息掛鉤（WH_GETMESSAGE）：程式取出的每一個鍵盤、滑鼠訊息都會經過這裡。
+/// 英文模式、或舊式（IMM32）程式在輸入法關閉時不會把按鍵交給 TSF，靠它才看得到 Shift。
+LRESULT CALLBACK messageHookProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION && wParam == PM_REMOVE && t_threadService) {
+        t_threadService->onThreadMessage(*reinterpret_cast<const MSG*>(lParam));
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+void CALLBACK republishTimerProc(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    if (t_threadService) t_threadService->onRepublishTimer();
+}
+
+/// compartment 的值（VT_EMPTY 表示沒有人設定過）。
+struct CompartmentRead {
+    VARTYPE type = VT_EMPTY;
+    LONG value = 0;
+};
+
+CompartmentRead readCompartmentValue(ITfCompartment* compartment) {
+    CompartmentRead result;
+    if (!compartment) return result;
+    VARIANT value;
+    VariantInit(&value);
+    if (SUCCEEDED(compartment->GetValue(&value))) {
+        result.type = value.vt;
+        if (value.vt == VT_I4) result.value = value.lVal;
+    }
+    VariantClear(&value);
+    return result;
+}
+
+DWORD adviseCompartmentSink(ITfCompartment* compartment, ITfCompartmentEventSink* sink) {
+    ComPtr<ITfSource> source;
+    DWORD cookie = TF_INVALID_COOKIE;
+    if (compartment && SUCCEEDED(compartment->QueryInterface(IID_PPV_ARGS(&source)))) {
+        if (FAILED(source->AdviseSink(IID_ITfCompartmentEventSink, sink, &cookie))) cookie = TF_INVALID_COOKIE;
+    }
+    return cookie;
+}
+
+void unadviseCompartmentSink(ITfCompartment* compartment, DWORD& cookie) {
+    ComPtr<ITfSource> source;
+    if (compartment && cookie != TF_INVALID_COOKIE && SUCCEEDED(compartment->QueryInterface(IID_PPV_ARGS(&source)))) {
+        source->UnadviseSink(cookie);
+    }
+    cookie = TF_INVALID_COOKIE;
+}
 
 bool isKeyDown(int vk) {
     return (GetKeyState(vk) & 0x8000) != 0;
@@ -134,6 +189,8 @@ STDMETHODIMP TextService::QueryInterface(REFIID riid, void** ppv) {
         *ppv = static_cast<ITfDisplayAttributeProvider*>(this);
     } else if (IsEqualIID(riid, IID_ITfTextLayoutSink)) {
         *ppv = static_cast<ITfTextLayoutSink*>(this);
+    } else if (IsEqualIID(riid, IID_ITfCompartmentEventSink)) {
+        *ppv = static_cast<ITfCompartmentEventSink*>(this);
     }
     if (!*ppv) return E_NOINTERFACE;
     AddRef();
@@ -192,8 +249,23 @@ STDMETHODIMP TextService::ActivateEx(ITfThreadMgr* threadMgr, TfClientId clientI
         DWORD activeFlags = 0;
         ComPtr<ITfThreadMgrEx> threadMgrEx;
         if (SUCCEEDED(threadMgr->QueryInterface(IID_PPV_ARGS(&threadMgrEx)))) threadMgrEx->GetActiveFlags(&activeFlags);
-        debugLog(L"棒棒注音：啟用（ActivateEx 0x%X、TSF 0x%X，%s）", static_cast<unsigned>(flags), static_cast<unsigned>(activeFlags),
-                 engine_ ? L"模型已載入" : L"沒有模型，按鍵全部交還");
+        // 中英狀態：所有程式共用的全域狀態（還沒有人設定過就是中文）。
+        t_threadService = this;
+        chinese_ = readGlobalMode();
+        adviseCompartmentSinks();
+        ComPtr<ITfLangBarItemMgr> langBar;
+        if (SUCCEEDED(threadMgr->QueryInterface(IID_PPV_ARGS(&langBar)))) {
+            modeButton_.Attach(new InputModeButton([this](TfLBIClick click, POINT point) { onModeButtonClick(click, point); }));
+            modeButton_->setChinese(chinese_);
+            if (FAILED(langBar->AddItem(modeButton_.Get()))) {
+                modeButton_->detach();
+                modeButton_.Reset();
+            }
+        }
+        installMessageHook();
+        debugLog(L"棒棒注音：啟用（client %lu，ActivateEx 0x%X、TSF 0x%X，%s，%s）", static_cast<unsigned long>(clientId),
+                 static_cast<unsigned>(flags), static_cast<unsigned>(activeFlags), engine_ ? L"模型已載入" : L"沒有模型，按鍵全部交還",
+                 chinese_ ? L"中文" : L"英文");
         publishInputMode();
         return S_OK;
     });
@@ -201,6 +273,7 @@ STDMETHODIMP TextService::ActivateEx(ITfThreadMgr* threadMgr, TfClientId clientI
 
 STDMETHODIMP TextService::Deactivate() {
     return guarded([&]() -> HRESULT {
+        debugLog(L"棒棒注音：停用（client %lu）", static_cast<unsigned long>(clientId_));
         // 切換到別的輸入法時，送出整個組字區。
         commitComposition();
         closeCandidateUI();
@@ -208,6 +281,18 @@ STDMETHODIMP TextService::Deactivate() {
         if (candidateUI_) {
             candidateUI_->detach();  // 程式可能還拿著這個 UI 元件
             candidateUI_.Reset();
+        }
+        removeMessageHook();
+        if (republishTimer_) KillTimer(nullptr, republishTimer_);
+        republishTimer_ = 0;
+        if (t_threadService == this) t_threadService = nullptr;
+        shiftTap_.reset();
+        unadviseCompartmentSinks();
+        if (modeButton_) {
+            ComPtr<ITfLangBarItemMgr> langBar;
+            if (threadMgr_ && SUCCEEDED(threadMgr_.As(&langBar))) langBar->RemoveItem(modeButton_.Get());
+            modeButton_->detach();
+            modeButton_.Reset();
         }
         if (threadMgr_) {
             ComPtr<ITfSource> source;
@@ -279,8 +364,9 @@ STDMETHODIMP TextService::OnSetThreadFocus() {
 }
 
 STDMETHODIMP TextService::OnKillThreadFocus() {
-    // 切換到別的應用程式時，送出整個組字區（同 Mac 版）。
+    // 切換到別的應用程式時，送出整個組字區（同 Mac 版）。Shift 的放開可能送到別的程式，忘掉進行中的單按。
     return guarded([&]() -> HRESULT {
+        shiftTap_.reset();
         commitComposition();
         return S_OK;
     });
@@ -306,6 +392,8 @@ STDMETHODIMP TextService::OnSetFocus(BOOL) {
 TextService::KeyDecision TextService::decide(ITfContext* context, WPARAM wParam, LPARAM lParam) const {
     KeyDecision decision;
     if (!session_ || !context) return decision;
+    // 英文模式：按鍵全部交給應用程式（Caps Lock、Shift＋字母都照系統原本的行為）。
+    if (!chinese_) return decision;
     // 密碼欄、唯讀欄位等不能輸入的地方：按鍵全部交還。
     if (compartmentIsSet(context, GUID_COMPARTMENT_KEYBOARD_DISABLED) || compartmentIsSet(context, GUID_COMPARTMENT_EMPTYCONTEXT)) {
         return decision;
@@ -339,6 +427,7 @@ TextService::KeyDecision TextService::decide(ITfContext* context, WPARAM wParam,
 STDMETHODIMP TextService::OnTestKeyDown(ITfContext* context, WPARAM wParam, LPARAM lParam, BOOL* eaten) {
     if (!eaten) return E_INVALIDARG;
     *eaten = FALSE;
+    shiftTap_.keyDown(static_cast<unsigned>(wParam));
     return guarded([&]() -> HRESULT {
         *eaten = decide(context, wParam, lParam).action != KeyAction::PassThrough;
         return S_OK;
@@ -348,6 +437,7 @@ STDMETHODIMP TextService::OnTestKeyDown(ITfContext* context, WPARAM wParam, LPAR
 STDMETHODIMP TextService::OnKeyDown(ITfContext* context, WPARAM wParam, LPARAM lParam, BOOL* eaten) {
     if (!eaten) return E_INVALIDARG;
     *eaten = FALSE;
+    shiftTap_.keyDown(static_cast<unsigned>(wParam));
     const HRESULT hr = guarded([&]() -> HRESULT {
         // 組字還留在別的文件裡（焦點換了卻沒收到通知）：先把那邊送出。
         if (compositionContext_ && context && compositionContext_.Get() != context) commitComposition();
@@ -383,15 +473,22 @@ STDMETHODIMP TextService::OnKeyDown(ITfContext* context, WPARAM wParam, LPARAM l
 STDMETHODIMP TextService::OnTestKeyUp(ITfContext*, WPARAM wParam, LPARAM, BOOL* eaten) {
     if (!eaten) return E_INVALIDARG;
     // 只吃掉「按下時被吃掉」的鍵的放開事件：應用程式看到按下的鍵，就一定看得到放開。
+    // Shift 從來不吃，所以程式一定看得到 Shift 放開。
     *eaten = wParam < eatenKeyDown_.size() && eatenKeyDown_[wParam];
-    return S_OK;
+    return guarded([&]() -> HRESULT {
+        if (shiftTap_.keyUp(static_cast<unsigned>(wParam))) toggleMode();
+        return S_OK;
+    });
 }
 
 STDMETHODIMP TextService::OnKeyUp(ITfContext*, WPARAM wParam, LPARAM, BOOL* eaten) {
     if (!eaten) return E_INVALIDARG;
     *eaten = wParam < eatenKeyDown_.size() && eatenKeyDown_[wParam];
     if (wParam < eatenKeyDown_.size()) eatenKeyDown_[wParam] = false;
-    return S_OK;
+    return guarded([&]() -> HRESULT {
+        if (shiftTap_.keyUp(static_cast<unsigned>(wParam))) toggleMode();
+        return S_OK;
+    });
 }
 
 STDMETHODIMP TextService::OnPreservedKey(ITfContext*, REFGUID, BOOL* eaten) {
@@ -436,13 +533,181 @@ STDMETHODIMP TextService::GetDisplayAttributeInfo(REFGUID guid, ITfDisplayAttrib
 
 void TextService::publishInputMode() {
     if (!threadMgr_) return;
-    // 註冊了 INPUTMODECOMPARTMENT 類別：工作列的輸入模式圖示、IMM32 程式看到的開關狀態都讀這兩個值。
-    // 中英切換（第 5 階段）會再更新它們。沒有模型時按鍵全部交還，算英文。
-    const bool chinese = engine_ != nullptr;
+    // 註冊了 INPUTMODECOMPARTMENT 類別：IMM32 程式看到的開關狀態、轉換模式都讀這兩個值。
+    // 沒有模型時按鍵全部交還，算英文。
+    const bool chinese = chinese_ && engine_ != nullptr;
+    writingCompartments_ = true;
     const HRESULT open = setCompartment(threadMgr_.Get(), clientId_, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, chinese ? TRUE : FALSE);
     const HRESULT mode = setCompartment(threadMgr_.Get(), clientId_, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
                                         chinese ? TF_CONVERSIONMODE_NATIVE : TF_CONVERSIONMODE_ALPHANUMERIC);
-    debugLog(L"棒棒注音：輸入模式（開關 0x%08X、轉換模式 0x%08X）", static_cast<unsigned>(open), static_cast<unsigned>(mode));
+    writingCompartments_ = false;
+    debugLog(L"棒棒注音：輸入模式 %s（開關 0x%08X、轉換模式 0x%08X）", chinese ? L"中文" : L"英文", static_cast<unsigned>(open),
+             static_cast<unsigned>(mode));
+}
+
+// MARK: - 中英切換
+
+ComPtr<ITfCompartment> TextService::compartment(REFGUID guid, bool global) const {
+    if (!threadMgr_) return nullptr;
+    ComPtr<ITfCompartmentMgr> manager;
+    if (global ? FAILED(threadMgr_->GetGlobalCompartment(&manager)) : FAILED(threadMgr_.As(&manager))) return nullptr;
+    ComPtr<ITfCompartment> result;
+    if (FAILED(manager->GetCompartment(guid, &result))) return nullptr;
+    return result;
+}
+
+bool TextService::readGlobalMode() const {
+    const CompartmentRead global = readCompartmentValue(compartment(kChineseModeCompartment, true).Get());
+    return global.type != VT_I4 || global.value != 0;  // 還沒有人設定過：中文
+}
+
+void TextService::setGlobalMode(bool chinese) {
+    if (const auto global = compartment(kChineseModeCompartment, true)) {
+        VARIANT value;
+        VariantInit(&value);
+        value.vt = VT_I4;
+        value.lVal = chinese ? 1 : 0;
+        global->SetValue(clientId_, &value);
+    }
+    // 其他程式（和這個程式的其他執行緒）收到 OnChange 後各自套用；這個執行緒馬上套用，不等通知。
+    applyMode(chinese);
+}
+
+void TextService::toggleMode() {
+    // 以這個程式目前的狀態為準：程式自己關掉了輸入法時，單按 Shift 是切回中文。
+    setGlobalMode(!chinese_);
+}
+
+void TextService::applyMode(bool chinese) {
+    if (chinese == chinese_) return;
+    // 切到英文前先送出組字區（同 Mac 版切換輸入法）。
+    if (!chinese) commitComposition();
+    chinese_ = chinese;
+    publishInputMode();
+    if (modeButton_) modeButton_->setChinese(chinese_);
+    debugLog(L"棒棒注音：切換成%s", chinese_ ? L"中文" : L"英文");
+}
+
+void TextService::adviseCompartmentSinks() {
+    auto* sink = static_cast<ITfCompartmentEventSink*>(this);
+    globalModeSinkCookie_ = adviseCompartmentSink(compartment(kChineseModeCompartment, true).Get(), sink);
+    openCloseSinkCookie_ = adviseCompartmentSink(compartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, false).Get(), sink);
+    conversionSinkCookie_ = adviseCompartmentSink(compartment(GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, false).Get(), sink);
+}
+
+void TextService::unadviseCompartmentSinks() {
+    unadviseCompartmentSink(compartment(kChineseModeCompartment, true).Get(), globalModeSinkCookie_);
+    unadviseCompartmentSink(compartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, false).Get(), openCloseSinkCookie_);
+    unadviseCompartmentSink(compartment(GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, false).Get(), conversionSinkCookie_);
+}
+
+STDMETHODIMP TextService::OnChange(REFGUID guid) {
+    return guarded([&]() -> HRESULT {
+        if (IsEqualGUID(guid, kChineseModeCompartment)) {
+            // 某個程式切換了中英（單按 Shift、點工作列圖示）：所有程式跟著切換。
+            applyMode(readGlobalMode());
+            return S_OK;
+        }
+        if (writingCompartments_ || !threadMgr_) return S_OK;
+        const bool chinese = chinese_ && engine_ != nullptr;
+        // 注意：在某個 compartment 的變更通知裡改同一個 compartment 會失敗（E_UNEXPECTED），所以重新設定一律延後。
+        if (IsEqualGUID(guid, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)) {
+            const CompartmentRead open = readCompartmentValue(compartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, false).Get());
+            if (open.type != VT_I4) {
+                schedulePublishInputMode();  // 被清掉了：重新設定
+            } else if ((open.value != 0) != chinese && engine_) {
+                // 程式自己打開或關掉輸入法（例如某些欄位）：只影響這個程式，不改全域的中英狀態。
+                debugLog(L"棒棒注音：程式把輸入法%s（只影響這個程式）", open.value != 0 ? L"打開" : L"關閉");
+                applyMode(open.value != 0);
+            }
+        } else if (IsEqualGUID(guid, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION)) {
+            const CompartmentRead mode = readCompartmentValue(compartment(GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, false).Get());
+            // 第 3 階段的已知問題：啟用後不久，轉換模式會被清成 VT_EMPTY（不是我們清的）。被清掉就重新設定；
+            // 程式改成別的值則只記錄（例如某些欄位要求英數），不和程式搶。
+            if (mode.type != VT_I4) {
+                debugLog(L"棒棒注音：轉換模式被清掉了，稍後重新設定");
+                schedulePublishInputMode();
+            } else {
+                debugLog(L"棒棒注音：轉換模式被改成 0x%X", static_cast<unsigned>(mode.value));
+            }
+        }
+        return S_OK;
+    });
+}
+
+void TextService::installMessageHook() {
+    if (messageHook_) return;
+    messageHook_ = SetWindowsHookExW(WH_GETMESSAGE, messageHookProc, nullptr, GetCurrentThreadId());
+    if (!messageHook_) debugLog(L"棒棒注音：無法安裝訊息掛鉤（%lu），只能靠 TSF 的按鍵通知偵測 Shift", GetLastError());
+}
+
+void TextService::removeMessageHook() {
+    if (messageHook_) UnhookWindowsHookEx(messageHook_);
+    messageHook_ = nullptr;
+}
+
+void TextService::schedulePublishInputMode() {
+    if (!republishTimer_) republishTimer_ = SetTimer(nullptr, 0, 0, republishTimerProc);
+}
+
+void TextService::onRepublishTimer() {
+    republishTimer_ = 0;
+    guarded([&]() -> HRESULT {
+        publishInputMode();
+        return S_OK;
+    });
+}
+
+void TextService::onThreadMessage(const MSG& message) {
+    guarded([&]() -> HRESULT {
+        switch (message.message) {
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            shiftTap_.keyDown(static_cast<unsigned>(message.wParam));
+            break;
+        case WM_KEYUP:
+        case WM_SYSKEYUP:
+            if (shiftTap_.keyUp(static_cast<unsigned>(message.wParam))) toggleMode();
+            break;
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_XBUTTONDOWN:
+        case WM_NCLBUTTONDOWN:
+        case WM_NCRBUTTONDOWN:
+        case WM_NCMBUTTONDOWN:
+        case WM_NCXBUTTONDOWN:
+            shiftTap_.mouseDown();  // Shift＋點選（選取文字）不算單按
+            break;
+        default:
+            break;
+        }
+        return S_OK;
+    });
+}
+
+void TextService::onModeButtonClick(TfLBIClick click, POINT point) {
+    if (click == TF_LBI_CLK_LEFT) {
+        toggleMode();
+    } else {
+        showModeMenu(point);
+    }
+}
+
+void TextService::showModeMenu(POINT point) {
+    // 選單要有同一個執行緒的視窗當擁有者。
+    HWND owner = GetForegroundWindow();
+    if (!owner || GetWindowThreadProcessId(owner, nullptr) != GetCurrentThreadId()) owner = candidateOwner(activeContext_.Get());
+    if (!owner) return;
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    const std::wstring title = L"棒棒注音 " + utf8::toWide(BANGBANG_VERSION_STRING);
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 1, title.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, 2, chinese_ ? L"切換成英文（單按 Shift）" : L"切換成中文（單按 Shift）");
+    const UINT command = static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, point.x, point.y, owner, nullptr));
+    DestroyMenu(menu);
+    if (command == 2) toggleMode();
 }
 
 // MARK: - 組字
