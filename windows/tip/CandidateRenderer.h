@@ -2,8 +2,9 @@
 
 // 候選窗的內容：量測大小與繪製（Direct2D＋DirectWrite，單位一律是 DIP）。
 // 候選窗視窗（CandidateWindow）與 testpad 的 PNG 輸出共用這份程式。
-// 版面比照 Sources/BangbangZhuyin/CandidatePanel.swift：直式清單、左側 1–9 編號、反白圓角、
-// 多頁時右下角顯示頁碼；列高 30、邊距 6、編號欄 22、候選字 20、編號 13、頁碼 11。
+// 版面比照 Windows 11 的微軟注音（2026-11-23 使用者要求，從截圖量的）：直式清單、寬 140、列高 32、
+// 編號與候選字都是 15；反白是淺灰底加左側強調色短線（字不變色）；多頁時右側用直排圓點表示第幾頁。
+// Mac 版（CandidatePanel.swift）是列高 30、候選字 20、反白填滿強調色、右下角頁碼。
 
 #include <windows.h>
 #include <d2d1.h>
@@ -30,12 +31,18 @@ struct CandidatePage {
 /// 候選窗的顏色。
 struct CandidateTheme {
     bool dark = false;
+    /// 高對比模式：反白整列填滿系統的反白色（一般是淺灰底加強調色短線）。
+    bool highContrast = false;
     D2D1_COLOR_F background{};
     D2D1_COLOR_F text{};
     D2D1_COLOR_F number{};
-    D2D1_COLOR_F footer{};
+    /// 頁數圓點。
+    D2D1_COLOR_F pageDots{};
+    /// 反白列的底色與字的顏色。
     D2D1_COLOR_F highlight{};
     D2D1_COLOR_F highlightText{};
+    /// 反白列左側的短線（系統強調色）。
+    D2D1_COLOR_F indicator{};
 
     /// 依系統設定：應用程式的淺色／深色模式，反白用系統的強調色；高對比模式用系統色。
     static CandidateTheme current();
@@ -62,7 +69,6 @@ private:
     Microsoft::WRL::ComPtr<IDWriteFactory> dwrite_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> candidateFormat_;
     Microsoft::WRL::ComPtr<IDWriteTextFormat> numberFormat_;
-    Microsoft::WRL::ComPtr<IDWriteTextFormat> footerFormat_;
 };
 
 }  // namespace bangbang

@@ -1,6 +1,7 @@
 #include "InputSession.h"
 
 #include <algorithm>
+#include <string_view>
 
 #include "Punctuation.h"
 #include "UserModel.h"
@@ -20,8 +21,43 @@ char toUpperAscii(char c) {
 
 }  // namespace
 
+char englishCharacter(char key, bool shift, bool capsLock) {
+    if (key >= 'a' && key <= 'z') return shift != capsLock ? toUpperAscii(key) : key;
+    if (!shift) return key;
+    static constexpr std::string_view plain = "`1234567890-=[]\\;',./";
+    static constexpr std::string_view shifted = "~!@#$%^&*()_+{}|:\"<>?";
+    const auto index = plain.find(key);
+    return index == std::string_view::npos ? key : shifted[index];
+}
+
 InputSession::InputSession(std::shared_ptr<const LanguageModel> lm, UserModel* model)
     : composition(Decoder(std::move(lm), model)), userModel(model) {}
+
+bool InputSession::containsChinese() const {
+    if (!composer_.isEmpty()) return true;
+    const auto& tokens = composition.tokens();
+    return std::any_of(tokens.begin(), tokens.end(), [](const Token& t) { return t.syllable().has_value(); });
+}
+
+std::optional<KeyEvent> InputSession::englishModeKey(const KeyEvent& key, bool capsLock) const {
+    using T = KeyEvent::Type;
+    const bool candidatesOpen = candidateList_.has_value();
+    const bool chooseCandidate = candidatesOpen && key.type == T::Character && !key.shift && !key.ctrl && key.ch >= '1' && key.ch <= '9';
+    switch (key.type) {
+    case T::Enter: case T::Escape: case T::Backspace: case T::ForwardDelete: case T::Left: case T::Right:
+    case T::Home: case T::End: case T::Up: case T::Down: case T::PageUp: case T::PageDown:
+        return key;  // 選字、編輯、送出、取消
+    default:
+        break;
+    }
+    if (key.ctrl || chooseCandidate || (key.type == T::Space && candidatesOpen)) return key;
+    if (!containsChinese()) return std::nullopt;  // 只有 Ctrl＋標點打出的全形標點：先送出，按鍵交給程式
+    switch (key.type) {
+    case T::Character: return KeyEvent::literal(englishCharacter(key.ch, key.shift, capsLock));
+    case T::Space: return KeyEvent::literal(' ');
+    default: return key;  // 數字鍵盤、Tab：和中文模式組字中一樣
+    }
+}
 
 std::string InputSession::markedText() const {
     return composition.textBeforeCursor() + composer_.display() + composition.textAfterCursor();
@@ -57,8 +93,9 @@ SessionOutput InputSession::handle(const KeyEvent& key) {
     }
     switch (key.type) {
     case T::Character:
-        return handleCharacter(key.ch, key.shift);
+        return handleCharacter(key.ch, key.shift, key.ctrl);
     case T::Numpad:
+    case T::Literal:
         return insertLiteral(std::string(1, key.ch));
     case T::Space:
         if (!composer_.isEmpty()) return completeSyllable(1);
@@ -124,8 +161,9 @@ bool InputSession::wouldHandle(const KeyEvent& key) const {
     if (candidateList_ && candidateKeyWouldBeHandled(key)) return true;
     switch (key.type) {
     case T::Character:
-        return characterWouldBeHandled(key.ch, key.shift);
+        return characterWouldBeHandled(key.ch, key.shift, key.ctrl);
     case T::Numpad:
+    case T::Literal:
         return true;
     case T::Space:
     case T::Backspace:
@@ -147,14 +185,15 @@ bool InputSession::wouldHandle(const KeyEvent& key) const {
     return false;
 }
 
-bool InputSession::characterWouldBeHandled(char c, bool shift) const {
+bool InputSession::characterWouldBeHandled(char c, bool shift, bool ctrl) const {
+    if (ctrl) return !shift && Punctuation::control(c, punctuationStyle_).has_value();
     if (shift) {
         if (isAsciiLetter(c)) return true;
-        if (Punctuation::shifted(c)) return true;
+        if (Punctuation::shifted(c, punctuationStyle_)) return true;
         return isComposing();
     }
     if (DaChenLayout::component(c)) return true;  // 注音鍵、聲調鍵都會處理（可能是嗶聲）
-    if (Punctuation::unshifted(c)) return true;
+    if (Punctuation::unshifted(c, punctuationStyle_)) return true;
     return isComposing();
 }
 
@@ -162,7 +201,7 @@ bool InputSession::candidateKeyWouldBeHandled(const KeyEvent& key) {
     using T = KeyEvent::Type;
     switch (key.type) {
     case T::Character:
-        return !key.shift && key.ch >= '1' && key.ch <= '9';
+        return !key.shift && !key.ctrl && key.ch >= '1' && key.ch <= '9';
     case T::Enter:
     case T::Down:
     case T::Up:
@@ -181,11 +220,18 @@ bool InputSession::candidateKeyWouldBeHandled(const KeyEvent& key) {
 
 // MARK: - 一般按鍵
 
-SessionOutput InputSession::handleCharacter(char c, bool shift) {
+SessionOutput InputSession::handleCharacter(char c, bool shift, bool ctrl) {
+    if (ctrl) {
+        // Windows 配置的 Ctrl＋標點：全形標點，和其他全形標點一樣進組字區，按 ↓ 可以換。
+        if (!shift) {
+            if (const auto p = Punctuation::control(c, punctuationStyle_)) return insertLiteral(*p);
+        }
+        return SessionOutput::passThrough();
+    }
     if (shift) {
         // Shift + 字母：半形大寫英文。
         if (isAsciiLetter(c)) return insertLiteral(std::string(1, toUpperAscii(c)));
-        if (const auto p = Punctuation::shifted(c)) return insertLiteral(*p);
+        if (const auto p = Punctuation::shifted(c, punctuationStyle_)) return insertLiteral(*p);
         return isComposing() ? SessionOutput::consumed() : SessionOutput::passThrough();
     }
     if (const auto component = DaChenLayout::component(c)) {
@@ -197,7 +243,7 @@ SessionOutput InputSession::handleCharacter(char c, bool shift) {
         composer_.receive(*component);
         return SessionOutput::consumed();
     }
-    if (const auto p = Punctuation::unshifted(c)) return insertLiteral(*p);
+    if (const auto p = Punctuation::unshifted(c, punctuationStyle_)) return insertLiteral(*p);
     return isComposing() ? SessionOutput::consumed() : SessionOutput::passThrough();
 }
 
@@ -258,7 +304,7 @@ std::optional<SessionOutput> InputSession::handleCandidateKey(const KeyEvent& ke
     const int count = static_cast<int>(list.items.size());
     switch (key.type) {
     case T::Character: {
-        if (key.shift || key.ch < '1' || key.ch > '9') return std::nullopt;
+        if (key.shift || key.ctrl || key.ch < '1' || key.ch > '9') return std::nullopt;
         const int index = list.page() * list.perPage + (key.ch - '1');
         if (index >= count || index >= (list.page() + 1) * list.perPage) return SessionOutput::rejected();
         choose(list.items[index]);

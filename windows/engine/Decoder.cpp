@@ -226,7 +226,7 @@ std::vector<Candidate> Decoder::candidates(const std::vector<Token>& tokens, int
     const int position = cursor < n ? cursor : n - 1;
     if (tokens[position].isLiteral()) {
         std::vector<Candidate> result;
-        for (auto& symbol : Punctuation::alternatives(tokens[position].text)) {
+        for (auto& symbol : Punctuation::alternatives(tokens[position].text, punctuationStyle)) {
             result.push_back(Candidate{position, 1, std::nullopt, std::move(symbol)});
         }
         return result;

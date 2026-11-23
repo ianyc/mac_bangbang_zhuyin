@@ -122,41 +122,35 @@ std::optional<BopomofoComponent> component(char key) {
 }  // namespace DaChenLayout
 
 void BopomofoComposer::receive(BopomofoComponent component) {
-    int slot = 0;
     switch (component.kind) {
     case BopomofoComponent::Kind::Consonant:
         syllable_.consonant = component.value;
-        slot = 0;
         break;
     case BopomofoComponent::Kind::Medial:
         syllable_.medial = component.value;
-        slot = 1;
         break;
     case BopomofoComponent::Kind::Rime:
         syllable_.rime = component.value;
-        slot = 2;
         break;
     case BopomofoComponent::Kind::Tone:
-        return;
+        break;
     }
-    std::erase(order_, slot);
-    order_.push_back(slot);
 }
 
 void BopomofoComposer::backspace() {
-    if (order_.empty()) return;
-    const int slot = order_.back();
-    order_.pop_back();
-    switch (slot) {
-    case 0: syllable_.consonant = 0; break;
-    case 1: syllable_.medial = 0; break;
-    default: syllable_.rime = 0; break;
+    // 刪掉最靠近游標（顯示在最後面）的符號：韻母 → 介音 → 聲母。Windows 版的改動（2026-11-23 使用者要求），
+    // Mac 版是刪掉最後輸入的那個：先打 ㄏㄨ 再打 ㄈ（取代成 ㄈㄨ）時，Mac 版刪 ㄈ，這裡刪 ㄨ。
+    if (syllable_.rime) {
+        syllable_.rime = 0;
+    } else if (syllable_.medial) {
+        syllable_.medial = 0;
+    } else {
+        syllable_.consonant = 0;
     }
 }
 
 void BopomofoComposer::clear() {
     syllable_ = Syllable();
-    order_.clear();
 }
 
 std::optional<Syllable> BopomofoComposer::completed(std::uint8_t tone) const {

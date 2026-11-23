@@ -35,14 +35,18 @@ TEST(BopomofoTests, testDaChenLayout) {
     EXPECT_EQ(DaChenLayout::component('-'), BopomofoComponent::rime(13));  // ㄦ
 }
 
+// Windows 版改過（2026-11-23 使用者要求）：Backspace 刪掉最靠近游標的符號，不是最後輸入的。
+// Mac 版的這個測試是「刪掉最後輸入的 ㄇ → ㄚ」。
 TEST(BopomofoTests, testComposerReplacesSlotAndBackspaces) {
     BopomofoComposer composer;
     composer.receive(BopomofoComponent::consonant(1));  // ㄅ
     composer.receive(BopomofoComponent::rime(1));       // ㄚ
     composer.receive(BopomofoComponent::consonant(3));  // ㄇ 取代 ㄅ
     EXPECT_EQ(composer.display(), "ㄇㄚ");
-    composer.backspace();  // 刪掉最後輸入的 ㄇ
-    EXPECT_EQ(composer.display(), "ㄚ");
+    composer.backspace();  // 刪掉最靠近游標的 ㄚ
+    EXPECT_EQ(composer.display(), "ㄇ");
+    composer.backspace();
+    EXPECT_TRUE(composer.isEmpty());
 }
 
 // MARK: - InputSessionTests

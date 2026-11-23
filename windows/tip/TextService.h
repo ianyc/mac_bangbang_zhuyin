@@ -34,6 +34,9 @@ class TextService final : public ITfTextInputProcessorEx,
                           public ITfCompartmentEventSink,
                           private CandidateListHost {
 public:
+    /// 組字區最多幾個字，超過就自動送出最前面的詞（Mac 版是 20；2026-11-23 使用者要求 Windows 版改成 30）。
+    static constexpr int kMaxCompositionLength = 30;
+
     TextService();
 
     /// 這個執行緒的訊息掛鉤收到的訊息（偵測單按 Shift、Shift＋滑鼠）。內部使用。
@@ -122,8 +125,9 @@ private:
     /// 改變所有程式共用的中英狀態（單按 Shift、點工作列圖示）。這個執行緒馬上套用，其他程式收到通知後套用。
     void setGlobalMode(bool chinese);
     void toggleMode();
-    /// 只改這個執行緒：切到英文前先送出組字區，再更新 compartment 與工作列圖示。
-    void applyMode(bool chinese);
+    /// 只改這個執行緒的中英狀態，並更新 compartment 與工作列圖示。byUser：使用者自己切換（單按 Shift、點圖示、
+    /// 別的程式同步過來）時組字區留著；程式自己關掉輸入法時先送出組字區。
+    void applyMode(bool chinese, bool byUser);
     void adviseCompartmentSinks();
     void unadviseCompartmentSinks();
     void installMessageHook();

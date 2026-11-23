@@ -31,10 +31,10 @@ namespace {
 
 std::string describe(const KeyEvent& k) {
     static const char* names[] = {"Character", "Numpad", "Space", "Enter", "Backspace", "ForwardDelete", "Escape", "Tab",
-                                  "Left", "Right", "Up", "Down", "Home", "End", "PageUp", "PageDown"};
+                                  "Left", "Right", "Up", "Down", "Home", "End", "PageUp", "PageDown", "Literal"};
     std::ostringstream s;
     s << names[static_cast<int>(k.type)];
-    if (k.type == T::Character || k.type == T::Numpad) s << " '" << k.ch << "'" << (k.shift ? " +Shift" : "");
+    if (k.type == T::Character || k.type == T::Numpad) s << " '" << k.ch << "'" << (k.shift ? " +Shift" : "") << (k.ctrl ? " +Ctrl" : "");
     return s.str();
 }
 
@@ -43,6 +43,8 @@ std::vector<KeyEvent> allKeys() {
     for (const char c : std::string("`1234567890-=qwertyuiop[]\\asdfghjkl;'zxcvbnm,./")) {
         keys.push_back(ch(c, false));
         keys.push_back(ch(c, true));
+        keys.push_back(KeyEvent::control(c));
+        keys.push_back(KeyEvent{KeyEvent::Type::Character, c, true, true});  // Ctrl+Shift
     }
     for (const char c : std::string("0123456789.*+-/=")) keys.push_back(KeyEvent::numpad(c));
     for (const T t : {T::Space, T::Enter, T::Backspace, T::ForwardDelete, T::Escape, T::Tab, T::Left, T::Right, T::Up, T::Down,
@@ -85,9 +87,13 @@ std::string typeAndCommit(InputSession& session, std::string_view keys) {
 
 // MARK: - wouldHandle
 
-/// 各種狀態下的每一個按鍵，wouldHandle 的答案都必須和 handle 實際的 handled 相同。
+/// 各種狀態下的每一個按鍵，wouldHandle 的答案都必須和 handle 實際的 handled 相同（Mac 與 Windows 兩種標點配置）。
 TEST(SessionConsistencyTests, WouldHandleMatchesHandleInEveryState) {
     const auto lm = makeLM();
+    /// 打一個會進組字區的全形標點：Mac 配置是 Shift+,，Windows 配置是 Ctrl+,。
+    const auto fullWidth = [](InputSession& s, char c) {
+        s.handle(s.punctuationStyle() == Punctuation::Style::Windows ? KeyEvent::control(c) : ch(c, true));
+    };
     struct Setup {
         const char* name;
         std::function<void(InputSession&)> run;
@@ -99,23 +105,178 @@ TEST(SessionConsistencyTests, WouldHandleMatchesHandleInEveryState) {
         {"組字中、游標在最後", [](InputSession& s) { type(s, "su3cl3"); }, false},
         {"組字中、游標在最前", [](InputSession& s) { type(s, "su3cl3"); s.handle(key(T::Home)); }, false},
         {"組字中又在拼注音", [](InputSession& s) { type(s, "su3c"); }, false},
-        {"只有全形標點", [](InputSession& s) { s.handle(ch(',', true)); }, false},
+        {"只有全形標點", [&](InputSession& s) { fullWidth(s, ','); }, false},
         {"候選窗：字詞", [](InputSession& s) { type(s, "su3cl3"); s.handle(key(T::Home)); s.handle(key(T::Down)); }, true},
-        {"候選窗：符號", [](InputSession& s) { s.handle(ch(';', true)); s.handle(key(T::Down)); }, true},
+        {"候選窗：符號", [&](InputSession& s) { fullWidth(s, ';'); s.handle(key(T::Down)); }, true},
     };
     int checked = 0;
-    for (const auto& setup : setups) {
-        for (const auto& k : allKeys()) {
-            InputSession session(lm);
-            setup.run(session);
-            ASSERT_EQ(session.candidateList().has_value(), setup.expectCandidates) << setup.name;
-            const bool predicted = session.wouldHandle(k);
-            const bool actual = session.handle(k).handled;
-            EXPECT_EQ(predicted, actual) << setup.name << "：" << describe(k);
-            ++checked;
+    for (const auto style : {Punctuation::Style::Mac, Punctuation::Style::Windows}) {
+        for (const auto& setup : setups) {
+            for (const auto& k : allKeys()) {
+                InputSession session(lm);
+                session.setPunctuationStyle(style);
+                setup.run(session);
+                ASSERT_EQ(session.candidateList().has_value(), setup.expectCandidates) << setup.name;
+                const bool predicted = session.wouldHandle(k);
+                const bool actual = session.handle(k).handled;
+                EXPECT_EQ(predicted, actual) << (style == Punctuation::Style::Windows ? "Windows 配置，" : "Mac 配置，") << setup.name
+                                             << "：" << describe(k);
+                ++checked;
+            }
         }
     }
-    EXPECT_GT(checked, 900);
+    EXPECT_GT(checked, 3400);
+}
+
+// MARK: - 標點：Windows 配置（2026-11-23 使用者指定，比照微軟注音；對照表見 windows/README.md）
+
+namespace {
+
+using Strings = std::vector<std::string>;
+
+std::unique_ptr<InputSession> windowsSession(const std::shared_ptr<const LanguageModel>& lm) {
+    auto session = std::make_unique<InputSession>(lm);
+    session->setPunctuationStyle(Punctuation::Style::Windows);
+    return session;
+}
+
+}  // namespace
+
+/// 中文模式下 Shift＋標點與 ` [ ] ' 打出半形符號；沒有組字時直接送出，不出現候選（使用者清單的 c～i、l～n、p、q、s）。
+TEST(WindowsPunctuationTests, ShiftedAndBracketKeysAreHalfWidth) {
+    const auto lm = makeLM();
+    const std::vector<std::pair<KeyEvent, std::string>> cases = {
+        {ch(',', true), "<"}, {ch('.', true), ">"}, {ch('1', true), "!"}, {ch('`'), "`"}, {ch('`', true), "~"},
+        {ch('9', true), "("}, {ch('0', true), ")"}, {ch('['), "["}, {ch(']'), "]"}, {ch(';', true), ":"},
+        {ch('\''), "'"}, {ch('\'', true), "\""}, {ch('/', true), "?"},
+    };
+    for (const auto& [k, text] : cases) {
+        auto session = windowsSession(lm);
+        const auto out = session->handle(k);
+        EXPECT_TRUE(out.handled) << text;
+        EXPECT_EQ(out.commit, text) << "沒有組字時直接送出";
+        EXPECT_FALSE(session->isComposing()) << text;
+    }
+}
+
+/// Ctrl＋標點打出全形標點，進組字區（使用者清單的 a、b、j、k、o、r）；其他 Ctrl 組合鍵交給程式。
+TEST(WindowsPunctuationTests, ControlKeysTypeFullWidth) {
+    const auto lm = makeLM();
+    auto session = windowsSession(lm);
+    for (const char c : std::string(",.;'[]")) EXPECT_TRUE(session->handle(KeyEvent::control(c)).handled) << c;
+    EXPECT_EQ(session->markedText(), "，。；、【】");
+    EXPECT_EQ(session->handle(key(T::Enter)).commit, "，。；、【】");
+    EXPECT_FALSE(session->wouldHandle(KeyEvent::control('c')));
+    EXPECT_FALSE(session->handle(KeyEvent::control('c')).handled);
+    InputSession mac(lm);
+    EXPECT_FALSE(mac.wouldHandle(KeyEvent::control(','))) << "Mac 配置沒有 Ctrl＋標點";
+}
+
+/// 候選順序：「，」的第二個是「、」；「【」之後是「「」「『」，「】」之後是「」」「』」。
+TEST(WindowsPunctuationTests, ControlPunctuationCandidates) {
+    const auto lm = makeLM();
+    const auto candidates = [&](char c) {
+        auto session = windowsSession(lm);
+        session->handle(KeyEvent::control(c));
+        EXPECT_TRUE(session->handle(key(T::Down)).handled);
+        return session->candidateList() ? texts(session->candidateList()->items) : Strings{};
+    };
+    const auto firstThree = [&](char c) {
+        const Strings all = candidates(c);
+        return Strings(all.begin(), all.begin() + std::min<std::size_t>(3, all.size()));
+    };
+    EXPECT_EQ(firstThree(','), (Strings{"，", "、", ","}));
+    EXPECT_EQ(firstThree('['), (Strings{"【", "「", "『"}));
+    EXPECT_EQ(firstThree(']'), (Strings{"】", "」", "』"}));
+    EXPECT_EQ(candidates('.').front(), "。");
+    EXPECT_EQ(candidates(';').front(), "；");
+    EXPECT_EQ(candidates('\'').front(), "、");
+}
+
+/// 組字中打半形標點：和 Shift＋字母一樣進組字區，跟著句子一起送出。
+TEST(WindowsPunctuationTests, HalfWidthInsideComposition) {
+    auto session = windowsSession(makeLM());
+    type(*session, "su3");
+    session->handle(ch(',', true));
+    type(*session, "cl3");
+    EXPECT_EQ(session->markedText(), "你<好");
+    EXPECT_EQ(session->handle(key(T::Enter)).commit, "你<好");
+}
+
+// MARK: - 英文模式接著組字區打（2026-11-23 使用者要求：單按 Shift 不送出組字區）
+
+/// 英文模式下打出的字元：字母看 Shift 與 Caps Lock，其他鍵按 Shift 是美式鍵盤上排的符號。
+TEST(EnglishModeTests, EnglishCharacters) {
+    EXPECT_EQ(englishCharacter('a', false, false), 'a');
+    EXPECT_EQ(englishCharacter('a', true, false), 'A');
+    EXPECT_EQ(englishCharacter('a', false, true), 'A');
+    EXPECT_EQ(englishCharacter('a', true, true), 'a');
+    EXPECT_EQ(englishCharacter('1', true, false), '!');
+    EXPECT_EQ(englishCharacter('[', true, false), '{');
+    EXPECT_EQ(englishCharacter('/', true, true), '?');
+    EXPECT_EQ(englishCharacter(';', false, true), ';');
+}
+
+/// 組字區有中文時：英文、空白、數字、符號都放進組字區，按 Enter 才送出；選字、編輯的鍵照常。
+TEST(EnglishModeTests, TypingContinuesInsideTheComposition) {
+    auto session = windowsSession(makeLM());
+    type(*session, "su3");
+    ASSERT_TRUE(session->containsChinese());
+    for (const KeyEvent& k : {ch('o'), ch('k'), key(T::Space), ch('1'), ch('1', true), ch('[', true)}) {
+        const auto mapped = session->englishModeKey(k, false);
+        ASSERT_TRUE(mapped.has_value());
+        EXPECT_EQ(mapped->type, T::Literal);
+        EXPECT_TRUE(session->handle(*mapped).handled);
+    }
+    EXPECT_EQ(session->markedText(), "你ok 1!{");
+    EXPECT_EQ(session->englishModeKey(key(T::Backspace), false), key(T::Backspace));
+    EXPECT_EQ(session->englishModeKey(key(T::Enter), false), key(T::Enter));
+    EXPECT_EQ(session->handle(key(T::Enter)).commit, "你ok 1!{");
+}
+
+/// 組字區只有 Ctrl＋標點打出的全形標點時（沒有中文）：打英文會先送出組字區，按鍵交給程式。
+TEST(EnglishModeTests, PunctuationOnlyCompositionIsCommittedFirst) {
+    auto session = windowsSession(makeLM());
+    session->handle(KeyEvent::control(','));
+    ASSERT_TRUE(session->isComposing());
+    EXPECT_FALSE(session->containsChinese());
+    EXPECT_FALSE(session->englishModeKey(ch('a'), false).has_value());
+    EXPECT_FALSE(session->englishModeKey(key(T::Space), false).has_value());
+    EXPECT_EQ(session->englishModeKey(key(T::Down), false), key(T::Down));
+}
+
+/// 組字區滿了（Windows 版 30 格）會自動送出最前面的詞，英文模式接著打也一樣。
+TEST(EnglishModeTests, FullCompositionCommitsLeadingWords) {
+    auto session = windowsSession(makeLM());
+    session->maxCompositionLength = 3;
+    type(*session, "su3cl3");  // 你好
+    const auto a = session->englishModeKey(ch('a'), false);
+    ASSERT_TRUE(a.has_value());
+    std::string committed = session->handle(*a).commit;
+    EXPECT_EQ(committed, "") << "3 格還沒超過";
+    const auto b = session->englishModeKey(ch('b'), false);
+    ASSERT_TRUE(b.has_value());
+    committed += session->handle(*b).commit;
+    EXPECT_FALSE(committed.empty()) << "超過 3 格時送出最前面的詞";
+    EXPECT_EQ(committed + session->markedText(), "你好ab");
+}
+
+// MARK: - 拼注音時的 Backspace
+
+/// 刪掉最靠近游標的符號：ㄏㄨ 再打 ㄈ 變成 ㄈㄨ，Backspace 刪的是 ㄨ（使用者回報，2026-11-23；Mac 版刪 ㄈ）。
+TEST(BackspaceTests, DeletesComponentNearestTheCursor) {
+    InputSession session(makeLM());
+    type(session, "cjz");  // ㄏ ㄨ，再打 ㄈ 取代 ㄏ
+    EXPECT_EQ(session.markedText(), "ㄈㄨ");
+    session.handle(key(T::Backspace));
+    EXPECT_EQ(session.markedText(), "ㄈ");
+    type(session, "u,");  // ㄧ ㄝ
+    EXPECT_EQ(session.markedText(), "ㄈㄧㄝ");
+    session.handle(key(T::Backspace));
+    EXPECT_EQ(session.markedText(), "ㄈㄧ");
+    session.handle(key(T::Backspace));
+    session.handle(key(T::Backspace));
+    EXPECT_FALSE(session.isComposing());
 }
 
 // MARK: - UI-less 與滑鼠點選用的候選操作

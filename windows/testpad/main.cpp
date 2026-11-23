@@ -37,6 +37,7 @@
 #include "Globals.h"
 #include "InputSession.h"
 #include "LanguageModel.h"
+#include "TextService.h"
 #include "UserModel.h"
 #include "Utf8.h"
 
@@ -158,7 +159,9 @@ struct ScriptKey {
     KeyEvent event;
     std::string label;
     std::string check;
+    bool ctrl = false;
 };
+
 
 std::optional<UINT> virtualKeyFor(char c) {
     if (c >= 'a' && c <= 'z') return static_cast<UINT>('A' + (c - 'a'));
@@ -181,7 +184,7 @@ std::optional<UINT> virtualKeyFor(char c) {
 
 /// 按鍵腳本，格式同 bangbang-tool keys：小寫字母、數字、標點是一般按鍵，大寫字母是 Shift+字母，空白是空白鍵；
 /// <enter> <esc> <bs> <del> <left> <right> <up> <down> <home> <end> <tab> <space>、
-/// <num0>～<num9>（數字鍵盤）、<S-x>（Shift+x）。
+/// <num0>～<num9>（數字鍵盤）、<S-x>（Shift+x）、<C-x>（Ctrl+x）。
 /// 另外有檢查與操作（不送按鍵）：
 ///   <?cand>   候選窗顯示中、不在游標那一行上、沒有搶走焦點　　<?nocand>  候選窗沒有顯示
 ///   <?list>   候選字的 UI 元件內容（數量、每一個字、反白、頁碼）和引擎相同
@@ -217,6 +220,10 @@ std::vector<ScriptKey> parseKeys(std::string_view script) {
                 keys.push_back({static_cast<UINT>(VK_NUMPAD0 + (digit - '0')), false, KeyEvent::numpad(digit), label});
             } else if (name.size() == 3 && name.rfind("S-", 0) == 0) {
                 keys.push_back({*virtualKeyFor(name[2]), true, KeyEvent::character(name[2], true), label});
+            } else if (name.size() == 3 && name.rfind("C-", 0) == 0) {
+                ScriptKey key{*virtualKeyFor(name[2]), false, KeyEvent::control(name[2]), label};
+                key.ctrl = true;
+                keys.push_back(key);
             }
             continue;
         }
@@ -248,10 +255,12 @@ bool sendKey(ITfKeystrokeMgr* keystrokes, const ScriptKey& key) {
     BYTE state[256] = {};
     GetKeyboardState(state);
     const BYTE shift = key.shift ? 0x80 : 0;
+    const BYTE ctrl = key.ctrl ? 0x80 : 0;
     state[VK_SHIFT] = shift;
     state[VK_LSHIFT] = shift;
     state[VK_RSHIFT] = 0;
-    state[VK_CONTROL] = state[VK_LCONTROL] = state[VK_RCONTROL] = 0;
+    state[VK_CONTROL] = state[VK_LCONTROL] = ctrl;
+    state[VK_RCONTROL] = 0;
     state[VK_MENU] = state[VK_LMENU] = state[VK_RMENU] = 0;
     state[VK_CAPITAL] = 0;  // Caps Lock 關閉
     SetKeyboardState(state);
@@ -269,6 +278,7 @@ bool sendKey(ITfKeystrokeMgr* keystrokes, const ScriptKey& key) {
     pumpMessages();
 
     state[VK_SHIFT] = state[VK_LSHIFT] = 0;
+    state[VK_CONTROL] = state[VK_LCONTROL] = 0;
     SetKeyboardState(state);
     return eaten != FALSE;
 }
@@ -520,9 +530,16 @@ struct TestRun {
     bool shiftPending = false;
     std::string problems;
 
-    /// 標準答案切換這個程式的中英（切到英文前先送出組字區）。
-    void setChinese(bool value) {
-        if (chinese && !value && oracle->isComposing()) expectedCommits += oracle->commitAll();
+    /// 標準答案切換這個程式的中英。使用者自己切到英文（單按 Shift、點圖示）時組字區留著，只關掉候選窗；
+    /// 程式自己關掉輸入法時先送出組字區（同 TextService::applyMode）。
+    void setChinese(bool value, bool byUser = true) {
+        if (chinese && !value && oracle->isComposing()) {
+            if (!byUser) {
+                expectedCommits += oracle->commitAll();
+            } else if (oracle->candidateList()) {
+                oracle->handle(KeyEvent::of(KeyEvent::Type::Escape));
+            }
+        }
         chinese = value;
     }
 };
@@ -628,7 +645,7 @@ void runStep(const ScriptKey& key, TestRun& run) {
         const bool open = check.substr(9) != "0";
         writeCompartment(run.threadMgr, run.client, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, open ? 1 : 0);
         pumpMessages();
-        run.setChinese(open);  // 程式自己打開／關掉輸入法：只影響這個程式
+        run.setChinese(open, false);  // 程式自己打開／關掉輸入法：只影響這個程式
     } else if (check == "lbi-click") {
         const auto button = modeButton(run.threadMgr);
         RECT area{};
@@ -672,7 +689,7 @@ struct TestCase {
 
 std::vector<TestCase> testCases() {
     std::string longSentence;
-    for (int i = 0; i < 22; ++i) longSentence += "su3";
+    for (int i = 0; i < TextService::kMaxCompositionLength + 2; ++i) longSentence += "su3";
     return {
         {"打字後 Enter 送出", "su3cl3<enter>"},
         {"組字中空白鍵進組字區，Enter 才送出", "5j/ jp6<space><enter>"},
@@ -680,8 +697,15 @@ std::vector<TestCase> testCases() {
         {"整句選字：越更新越難用", "m,4e/ vup m,4s06m/4<enter>"},
         {"沒有組字時 Shift+字母直接送出半形大寫", "A"},
         {"組字中 Shift+字母進組字區", "su3B<enter>"},
-        {"全形標點進組字區，Enter 才送出", "<S-,><enter>"},
-        {"標點夾在句子中間", "su3<S-,>cl3<enter>"},
+        {"全形標點（Ctrl＋,）進組字區，Enter 才送出", "<C-,><enter>"},
+        {"標點夾在句子中間", "su3<C-,>cl3<S-,><enter>"},
+        // 標點（Windows 配置，比照微軟注音；對照表見 README）
+        {"Shift＋標點是半形，沒有組字時直接送出", "<S-,><S-.><S-1><S-9><S-0><S-;><S-'><S-/><S-`>`[]'"},
+        {"Ctrl＋標點是全形：，。；、【】", "<C-,><C-.><C-;><C-'><C-[><C-]><enter>"},
+        {"Ctrl+, 的第二個候選是「、」", "<C-,><down><?cand><?list><down><enter><?nocand><enter>"},
+        {"Ctrl+[ 的候選依序是【「『", "<C-[><down><?cand><?list>3<?nocand>5j/ <C-]><enter>"},
+        {"英文模式下 Ctrl+, 也打出「，」，打英文時先送出", "<shift><?mode:en><C-,>a<shift><?mode:zh>"},
+        {"英文模式下 Ctrl+. 按 ↓ 換成半形", "<shift><?mode:en><C-.><down><?cand>2<?nocand><enter><shift><?mode:zh>"},
         {"括號", "<S-[>5j/ <S-]><enter>"},
         {"Esc 清掉整個組字區", "su3cl3<esc>"},
         {"Esc 清掉正在拼的注音", "su<esc>"},
@@ -692,7 +716,7 @@ std::vector<TestCase> testCases() {
         {"沒有注音時按聲調鍵：吃掉、不輸出", "3"},
         {"數字鍵盤：沒有組字時直接送出", "<num1><num2>"},
         {"數字鍵盤：組字中進組字區", "su3<num1><enter>"},
-        {"組字區超過 20 格，自動送出最前面的詞", longSentence + "<enter>"},
+        {"組字區超過 30 格，自動送出最前面的詞", longSentence + "<enter>"},
         {"沒有送出時，文件裡是組字中的文字", "su3cl3"},
         // 候選窗（第 4 階段）。「中文輸入法」= 5j/ jp6gj bj4z83
         {"候選窗：游標在最後按 ↓，只列最後一個字", "5j/ jp6gj bj4z83<down><?cand><?list><enter><?nocand>"},
@@ -700,17 +724,18 @@ std::vector<TestCase> testCases() {
         {"候選窗：數字鍵選字", "5j/ jp6<down><?cand>2<?nocand>"},
         {"候選窗：游標在字前面按 ↓，列出從這個字開始的詞", "5j/ jp6gj bj4z83<home><right><right><down><?cand><?list>1<?nocand>"},
         {"候選窗：空白鍵翻頁，Esc 關閉", "5j/ <down><space><?cand><?list><esc><?nocand>"},
-        {"符號候選：在「：」上按 ↓", "<S-;><down><?cand><?list><down><enter><?nocand>"},
+        {"符號候選：在「；」上按 ↓", "<C-;><down><?cand><?list><down><enter><?nocand>"},
         {"括號配對：在組字區換括號", "<S-[>5j/ <S-]><home><down><?list>2<?nocand>"},
         {"UI-less：程式自己畫，輸入法不顯示候選窗", "<?uiless>5j/ jp6<down><?nocand><?list><?ui-select:1><?list><?ui-finalize><?nocand>"},
         {"UI-less：Abort 關閉候選字", "<?uiless>5j/ jp6<down><?ui-abort><?nocand><enter>"},
         // 中英切換（第 5 階段）
         {"單按 Shift 切到英文，按鍵全部交還", "<?mode:zh><shift><?mode:en>su3<enter><bs><shift><?mode:zh>"},
-        {"組字中單按 Shift：先送出組字區再切到英文", "su3cl3<shift><?mode:en>a<shift><?mode:zh>"},
+        {"組字中單按 Shift：組字區留著，英文接著打在組字區", "su3cl3<shift><?mode:en>ab<shift><?mode:zh>su3<enter>"},
+        {"英文模式接著組字區打：空白、數字、符號也放進組字區，Enter 才送出", "su3<shift><?mode:en>a b1<S-1>.<S-[><enter><shift><?mode:zh>"},
         {"英文模式下再單按 Shift 切回中文", "<shift><shift><?mode:zh>su3<enter>"},
         {"Shift＋字母不會切換", "<shift-down>A<shift-up><?mode:zh>su3<enter>"},
         {"按住 Shift 點滑鼠不會切換", "<shift-down><click><shift-up><?mode:zh>su3<enter>"},
-        {"候選窗開著時單按 Shift：送出並關閉候選窗", "5j/ jp6<down><?cand><shift><?nocand><?mode:en><shift>"},
+        {"候選窗開著時單按 Shift：關閉候選窗，組字區留著", "5j/ jp6<down><?cand><shift><?nocand><?mode:en><shift><?mode:zh><enter>"},
         {"程式自己關掉輸入法：只有這個程式變英文", "<?set-open:0><?mode:en-local>su3<?set-open:1><?mode:zh>su3<enter>"},
         {"程式關掉輸入法後單按 Shift：切回中文", "<?set-open:0><shift><?mode:zh>su3<enter>"},
         {"點工作列的「中／英」圖示切換", "<?lbi-click><?mode:en>su3<?lbi-click><?mode:zh>su3<enter>"},
@@ -825,6 +850,8 @@ int runSelfTest(const std::filesystem::path& modelPath) {
             continue;
         }
         InputSession oracle(lm);
+        oracle.setPunctuationStyle(Punctuation::Style::Windows);  // 和輸入法一樣用 Windows 的標點配置
+        oracle.maxCompositionLength = TextService::kMaxCompositionLength;
         TestRun run = base;
         run.oracle = &oracle;
         forceChinese(run);
@@ -835,8 +862,19 @@ int runSelfTest(const std::filesystem::path& modelPath) {
                 continue;
             }
             run.shiftPending = false;  // Shift 按著時按了別的鍵
-            if (!run.chinese) {
-                // 英文模式：輸入法不吃任何鍵（testpad 不會再把鍵送給 RichEdit，所以文件不變）。
+            if (!run.chinese && !key.ctrl) {
+                // 英文模式：沒有組字時輸入法不吃任何鍵（testpad 不會再把鍵送給 RichEdit，所以文件不變）。
+                // 組字區裡還有字時，照 InputSession::englishModeKey（和輸入法相同）：交給輸入法，或先送出組字區再交給程式。
+                const bool composing = oracle.isComposing();
+                const auto mapped = composing ? oracle.englishModeKey(key.event, false) : std::nullopt;
+                if (mapped && oracle.wouldHandle(*mapped)) {
+                    const SessionOutput out = oracle.handle(*mapped);
+                    run.expectedCommits += out.commit;
+                    const bool eaten = sendKey(keystrokes.Get(), key);
+                    if (eaten != out.handled) run.problems += "  英文模式組字中按鍵 " + key.label + "：輸入法" + (eaten ? "吃掉了" : "沒有吃掉") + "\n";
+                    continue;
+                }
+                if (composing) run.expectedCommits += oracle.commitAll();
                 if (sendKey(keystrokes.Get(), key)) run.problems += "  英文模式下按鍵 " + key.label + " 被輸入法吃掉了\n";
                 continue;
             }
@@ -1198,7 +1236,7 @@ int timeCandidates(const std::wstring& mode, bool software, const std::filesyste
         std::fflush(stdout);
         last = now;
     };
-    CandidatePage page{{L"中文", L"中聞", L"終聞", L"鐘文", L"忠", L"中", L"鐘", L"終", L"忠文"}, 0, 0, 3};
+    CandidatePage page{{L"試", L"是", L"事", L"市", L"式", L"世", L"室", L"視", L"士"}, 0, 0, 13};
     const RECT anchor{300, 300, 360, 330};
 
     if (mode == L"window") {

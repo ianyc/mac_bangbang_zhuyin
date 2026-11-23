@@ -119,6 +119,8 @@ bool CandidateWindow::createTarget() {
         debugLog(L"棒棒注音：無法建立候選窗的繪圖目標");
         return false;
     }
+    // 灰階反鋸齒（同 Windows 11 的微軟注音與系統介面）：ClearType 在細筆畫的字邊緣會帶顏色。
+    target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     return true;
 }
 

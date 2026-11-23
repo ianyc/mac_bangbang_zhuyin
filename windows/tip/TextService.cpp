@@ -220,7 +220,11 @@ STDMETHODIMP TextService::ActivateEx(ITfThreadMgr* threadMgr, TfClientId clientI
         clientId_ = clientId;
         activateFlags_ = flags;
         engine_ = sharedEngine((flags & TF_TMAE_SECUREMODE) != 0);
-        if (engine_ && !session_) session_ = std::make_unique<InputSession>(engine_->lm, engine_->userModel.get());
+        if (engine_ && !session_) {
+            session_ = std::make_unique<InputSession>(engine_->lm, engine_->userModel.get());
+            session_->setPunctuationStyle(Punctuation::Style::Windows);  // 標點比照微軟注音（見 README 的對照表）
+            session_->maxCompositionLength = kMaxCompositionLength;
+        }
 
         ComPtr<ITfSource> source;
         if (SUCCEEDED(threadMgr->QueryInterface(IID_PPV_ARGS(&source)))) {
@@ -397,8 +401,6 @@ STDMETHODIMP TextService::OnSetFocus(BOOL) {
 TextService::KeyDecision TextService::decide(ITfContext* context, WPARAM wParam, LPARAM lParam) const {
     KeyDecision decision;
     if (!session_ || !context) return decision;
-    // 英文模式：按鍵全部交給應用程式（Caps Lock、Shift＋字母都照系統原本的行為）。
-    if (!chinese_) return decision;
     // 密碼欄、唯讀欄位等不能輸入的地方：按鍵全部交還。
     if (compartmentIsSet(context, GUID_COMPARTMENT_KEYBOARD_DISABLED) || compartmentIsSet(context, GUID_COMPARTMENT_EMPTYCONTEXT)) {
         return decision;
@@ -409,8 +411,42 @@ TextService::KeyDecision TextService::decide(ITfContext* context, WPARAM wParam,
         if (wParam == VK_CAPITAL && composing) decision.action = KeyAction::CommitThenPass;
         return decision;
     }
-    // Ctrl／Alt 組合鍵一律交給應用程式，不動組字區（同 Mac 版的 Command／Control／Option）。
-    if (isKeyDown(VK_CONTROL) || isKeyDown(VK_MENU)) return decision;
+    const bool ctrl = isKeyDown(VK_CONTROL);
+    const bool alt = isKeyDown(VK_MENU);
+    if (ctrl || alt) {
+        // Ctrl＋標點（, . ; ' [ ]）：不分中英模式，打出全形標點（Windows 配置，比照微軟注音）。
+        if (ctrl && !alt) {
+            auto key = keyEventFromKey(wParam, lParam, isKeyDown(VK_SHIFT));
+            if (key && key->type == KeyEvent::Type::Character) {
+                key->ctrl = true;
+                if (session_->wouldHandle(*key)) {
+                    decision.action = KeyAction::Handle;
+                    decision.key = *key;
+                }
+            }
+        }
+        // 其他 Ctrl／Alt 組合鍵一律交給應用程式，不動組字區（同 Mac 版的 Command／Control／Option）。
+        return decision;
+    }
+    if (!chinese_) {
+        // 英文模式：按鍵交給應用程式（Caps Lock、Shift＋字母都照系統原本的行為）。
+        // 組字區裡還有字時（從中文模式切過來、或 Ctrl＋標點打的）：怎麼處理由 InputSession::englishModeKey 決定，
+        // 組字區有中文就把英文也打在組字區；不然先送出組字區，再把鍵交給應用程式。
+        if (!composing) return decision;
+        const auto key = keyEventFromKey(wParam, lParam, isKeyDown(VK_SHIFT));
+        if (!key) {
+            decision.action = session_->containsChinese() ? KeyAction::Swallow : KeyAction::CommitThenPass;
+            return decision;
+        }
+        const auto mapped = session_->englishModeKey(*key, isToggled(VK_CAPITAL));
+        if (mapped && session_->wouldHandle(*mapped)) {
+            decision.action = KeyAction::Handle;
+            decision.key = *mapped;
+        } else {
+            decision.action = KeyAction::CommitThenPass;
+        }
+        return decision;
+    }
     // Caps Lock 鎖定大寫時，英文直接交給應用程式；組字中的話先送出組字區（同 Mac 版）。
     if (isToggled(VK_CAPITAL)) {
         if (composing) decision.action = KeyAction::CommitThenPass;
@@ -577,7 +613,7 @@ void TextService::setGlobalMode(bool chinese) {
         global->SetValue(clientId_, &value);
     }
     // 其他程式（和這個程式的其他執行緒）收到 OnChange 後各自套用；這個執行緒馬上套用，不等通知。
-    applyMode(chinese);
+    applyMode(chinese, true);
 }
 
 void TextService::toggleMode() {
@@ -585,10 +621,22 @@ void TextService::toggleMode() {
     setGlobalMode(!chinese_);
 }
 
-void TextService::applyMode(bool chinese) {
+void TextService::applyMode(bool chinese, bool byUser) {
     if (chinese == chinese_) return;
-    // 切到英文前先送出組字區（同 Mac 版切換輸入法）。
-    if (!chinese) commitComposition();
+    if (!chinese) {
+        // 使用者自己切到英文時，組字區留著：接著打的英文也放進組字區，按 Enter 或組字區滿了才送出
+        // （2026-11-23 使用者要求；Mac 版是先送出）。候選窗開著的話只關掉候選窗。
+        // 程式自己關掉輸入法（例如某些欄位），或舊式 IMM32 程式（暫時性的文件：英文模式下不會把按鍵交給輸入法），
+        // 照舊先送出組字區。
+        const ComPtr<ITfContext> context = compositionContext_ ? compositionContext_ : activeContext_;
+        TF_STATUS status{};
+        const bool transitory = context && SUCCEEDED(context->GetStatus(&status)) && (status.dwStaticFlags & TF_SS_TRANSITORY) != 0;
+        if (byUser && session_ && session_->isComposing() && !transitory) {
+            if (session_->candidateList()) candidateAbort();
+        } else {
+            commitComposition();
+        }
+    }
     chinese_ = chinese;
     publishInputMode();
     if (modeButton_) modeButton_->setChinese(chinese_);
@@ -612,7 +660,7 @@ STDMETHODIMP TextService::OnChange(REFGUID guid) {
     return guarded([&]() -> HRESULT {
         if (IsEqualGUID(guid, kChineseModeCompartment)) {
             // 某個程式切換了中英（單按 Shift、點工作列圖示）：所有程式跟著切換。
-            applyMode(readGlobalMode());
+            applyMode(readGlobalMode(), true);
             return S_OK;
         }
         if (writingCompartments_ || !threadMgr_) return S_OK;
@@ -625,7 +673,7 @@ STDMETHODIMP TextService::OnChange(REFGUID guid) {
             } else if ((open.value != 0) != chinese && engine_) {
                 // 程式自己打開或關掉輸入法（例如某些欄位）：只影響這個程式，不改全域的中英狀態。
                 debugLog(L"棒棒注音：程式把輸入法%s（只影響這個程式）", open.value != 0 ? L"打開" : L"關閉");
-                applyMode(open.value != 0);
+                applyMode(open.value != 0, false);
             }
         } else if (IsEqualGUID(guid, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION)) {
             const CompartmentRead mode = readCompartmentValue(compartment(GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION, false).Get());

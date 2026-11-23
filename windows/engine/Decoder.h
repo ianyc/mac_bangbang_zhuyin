@@ -10,6 +10,7 @@
 
 #include "Bopomofo.h"
 #include "LanguageModel.h"
+#include "Punctuation.h"
 
 namespace bangbang {
 
@@ -93,6 +94,8 @@ public:
     int phraseBeam = 12;
     /// 每個節點保留幾種「前一個詞」的狀態（二階搜尋的寬度）。
     int statesPerNode = 6;
+    /// 符號候選用哪一種標點配置（由 InputSession::setPunctuationStyle 設定）。
+    Punctuation::Style punctuationStyle = Punctuation::Style::Mac;
 
     std::vector<WalkNode> decode(const std::vector<Token>& tokens, const std::vector<Pin>& pins = {},
                                  WordId context = LanguageModel::kBoundary) const;

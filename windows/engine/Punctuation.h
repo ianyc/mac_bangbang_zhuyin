@@ -20,16 +20,28 @@ std::optional<std::string> opening(std::string_view bracket);
 std::optional<std::string> counterpart(std::string_view old, std::string_view replacement);
 }  // namespace Brackets
 
-/// 標點符號（仿微軟新注音／小麥注音的標準大千配置）。
+/// 標點符號。
 namespace Punctuation {
-/// 沒按 Shift 時的標點，例如 ' → 、。
-std::optional<std::string> unshifted(char key);
-/// 按著 Shift 時的標點，例如 Shift+, → ，。
-std::optional<std::string> shifted(char key);
-/// 某個符號的候選清單：自己排第一，其餘照組內順序。不在任何一組時回傳空陣列。
-std::vector<std::string> alternatives(std::string_view symbol);
+/// 標點的配置。
+enum class Style {
+    /// Mac 版（仿微軟新注音／小麥注音的標準大千配置）：Shift＋標點是全形，例如 Shift+, → ，。
+    Mac,
+    /// Windows 版（2026-11-23 使用者指定，比照 Windows 11 的微軟注音）：Shift＋標點是半形（Shift+, → <），
+    /// 全形標點改用 Ctrl（Ctrl+, → ，），[ ] ' 也是半形。對照表見 windows/README.md。
+    Windows,
+};
+
+/// 沒按 Shift 時的標點，例如 Mac 配置的 ' → 、。
+std::optional<std::string> unshifted(char key, Style style = Style::Mac);
+/// 按著 Shift 時的標點，例如 Mac 配置的 Shift+, → ，、Windows 配置的 Shift+, → <。
+std::optional<std::string> shifted(char key, Style style = Style::Mac);
+/// 按著 Ctrl 時的標點（只有 Windows 配置有），例如 Ctrl+, → ，。
+std::optional<std::string> control(char key, Style style = Style::Mac);
+/// 某個符號的候選清單：自己排第一，其餘照組內順序。優先用「以它開頭」的那一組，
+/// 沒有的話用第一個含有它的組。不在任何一組時回傳空陣列。
+std::vector<std::string> alternatives(std::string_view symbol, Style style = Style::Mac);
 /// 符號候選的分組（測試用）。
-const std::vector<std::vector<std::string>>& groups();
+const std::vector<std::vector<std::string>>& groups(Style style = Style::Mac);
 }  // namespace Punctuation
 
 }  // namespace bangbang

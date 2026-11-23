@@ -62,7 +62,7 @@ public:
 
     /// 放入一個聲母、介音或韻母；同一位置再按一次會取代。
     void receive(BopomofoComponent component);
-    /// 刪掉最後輸入的那個符號。
+    /// 刪掉最靠近游標（顯示在最後面）的那個符號：韻母 → 介音 → 聲母（Mac 版是刪掉最後輸入的）。
     void backspace();
     void clear();
     /// 加上聲調，得到完整音節。
@@ -72,8 +72,6 @@ public:
 
 private:
     Syllable syllable_;
-    /// 依輸入順序記錄哪些位置有值，倒退鍵時從最後輸入的開始刪。
-    std::vector<int> order_;
 };
 
 }  // namespace bangbang

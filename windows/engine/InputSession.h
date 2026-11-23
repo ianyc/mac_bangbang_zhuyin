@@ -23,17 +23,26 @@ struct KeyEvent {
     enum class Type : std::uint8_t {
         Character, Numpad, Space, Enter, Backspace, ForwardDelete, Escape, Tab,
         Left, Right, Up, Down, Home, End, PageUp, PageDown,
+        /// 直接放進組字區的半形字元 ch（英文模式下接著組字區打英文時，見 InputSession::englishModeKey）。
+        Literal,
     };
     Type type = Type::Character;
     char ch = 0;
     bool shift = false;
+    /// 按著 Ctrl（Windows 配置的 Ctrl＋標點）。其他 Ctrl 組合鍵由外殼直接交給 App，不會送進來。
+    bool ctrl = false;
 
-    static KeyEvent character(char c, bool shift = false) { return {Type::Character, c, shift}; }
-    static KeyEvent numpad(char c) { return {Type::Numpad, c, false}; }
-    static KeyEvent of(Type t) { return {t, 0, false}; }
+    static KeyEvent character(char c, bool shift = false) { return {Type::Character, c, shift, false}; }
+    static KeyEvent control(char c) { return {Type::Character, c, false, true}; }
+    static KeyEvent numpad(char c) { return {Type::Numpad, c, false, false}; }
+    static KeyEvent literal(char c) { return {Type::Literal, c, false, false}; }
+    static KeyEvent of(Type t) { return {t, 0, false, false}; }
 
     friend bool operator==(const KeyEvent&, const KeyEvent&) = default;
 };
+
+/// 美式鍵盤上這個鍵在英文模式下打出的字元：字母依 Shift 與 Caps Lock 決定大小寫，其他鍵按著 Shift 是上排的符號。
+char englishCharacter(char key, bool shift, bool capsLock);
 
 /// 一次按鍵處理的結果，由輸入法外殼套用到目前的 App。
 struct SessionOutput {
@@ -83,7 +92,21 @@ public:
     const BopomofoComposer& composer() const { return composer_; }
     const std::optional<CandidateList>& candidateList() const { return candidateList_; }
 
+    /// 標點配置：預設是 Mac 版的（移植的測試照 Mac 版的規格）；Windows 的輸入法用 Punctuation::Style::Windows。
+    Punctuation::Style punctuationStyle() const { return punctuationStyle_; }
+    void setPunctuationStyle(Punctuation::Style style) {
+        punctuationStyle_ = style;
+        composition.decoder.punctuationStyle = style;
+    }
+
     bool isComposing() const { return !composer_.isEmpty() || !composition.isEmpty(); }
+    /// 組字區裡有中文（正在拼的注音或已經選字的音節）。
+    bool containsChinese() const;
+    /// 英文模式下、組字區裡還有字時，這個鍵要交給 handle 的樣子；回傳 nullopt 表示先送出組字區，再把鍵交給程式。
+    /// - 組字區有中文（從中文模式切過來，組字區留著）：英文也打在組字區。字母、數字、符號、空白變成半形字元
+    ///   （KeyEvent::Literal），選字與編輯的鍵照常，按 Enter 或組字區滿了才送出（2026-11-23 使用者要求）。
+    /// - 只有 Ctrl＋標點打出的全形標點：選字、編輯的鍵照常，其他鍵先送出組字區。
+    std::optional<KeyEvent> englishModeKey(const KeyEvent& key, bool capsLock) const;
     /// 要顯示在 App 裡、帶底線的組字文字。
     std::string markedText() const;
     /// 組字文字中游標的位置（以字元，也就是碼位計）。
@@ -108,17 +131,18 @@ public:
 
 private:
     const LanguageModel& lm() const { return composition.decoder.lm(); }
-    SessionOutput handleCharacter(char c, bool shift);
+    SessionOutput handleCharacter(char c, bool shift, bool ctrl);
     SessionOutput completeSyllable(std::uint8_t tone);
     SessionOutput insertLiteral(const std::string& text);
     bool openCandidates();
     std::optional<SessionOutput> handleCandidateKey(const KeyEvent& key);
     void choose(const Candidate& candidate);
-    bool characterWouldBeHandled(char c, bool shift) const;
+    bool characterWouldBeHandled(char c, bool shift, bool ctrl) const;
     static bool candidateKeyWouldBeHandled(const KeyEvent& key);
 
     BopomofoComposer composer_;
     std::optional<CandidateList> candidateList_;
+    Punctuation::Style punctuationStyle_ = Punctuation::Style::Mac;
 };
 
 }  // namespace bangbang
