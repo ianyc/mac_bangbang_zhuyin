@@ -1,6 +1,7 @@
 ﻿<#
 .SYNOPSIS
-  開發用：把建置好的棒棒注音部署到 windows\out\deploy（或用 -Install 安裝到 Program Files），並向系統註冊。
+  開發用：把建置好的棒棒注音部署到 windows\out\deploy，並向系統註冊。
+  （安裝到 Program Files：用 windows\scripts\package.ps1 做安裝包，再執行安裝包裡的 install.cmd。）
 
 .DESCRIPTION
   1. 複製 x64 與 x86 的 BangbangZhuyin.dll、模型檔與授權到 windows\out\deploy（不納入 git）。
@@ -13,22 +14,18 @@
   新建在 AppData 的檔案會被轉存到那個程式的私有資料夾（%LOCALAPPDATA%\Packages\<程式>\LocalCache），
   其他程式在註冊的路徑上找不到 DLL，只好改用微軟注音。腳本會開放唯讀權限給 Microsoft Store 程式（沙盒）。
 
-  -Install 改把檔案安裝到 Program Files\BangbangZhuyin（x64\、x86\ 與共用的模型），和正式安裝（第 7 階段）的位置相同。
-  複製和註冊都需要系統管理員，所以每次執行都會跳出 UAC。只有放在這種一般使用者改不了的位置時，DLL 才會註冊
-  SECUREMODE 類別（允許在登入畫面這類安全模式載入）。之後不加 -Install 執行，會改回註冊開發版（Program Files 的檔案保留）。
+  開發版和安裝版（Program Files）註冊的是同一個輸入法，後註冊的會取代先註冊的：
+  執行這個腳本會改回開發版；執行安裝包的 install.cmd 會改成安裝版。
 
 .EXAMPLE
   windows\scripts\register.ps1                  # 部署 Debug 版並註冊
 .EXAMPLE
   windows\scripts\register.ps1 -Config Release  # 部署 Release 版
 .EXAMPLE
-  windows\scripts\register.ps1 -Install         # 安裝到 Program Files 並註冊
-.EXAMPLE
-  windows\scripts\register.ps1 -Unregister      # 從鍵盤清單移除、取消註冊，並刪除 Program Files 裡的安裝
+  windows\scripts\register.ps1 -Unregister      # 從鍵盤清單移除，並取消註冊開發版
 #>
 param(
     [ValidateSet('Debug', 'Release')] [string] $Config = 'Debug',
-    [switch] $Install,
     [switch] $Unregister,
     [switch] $ForceRegister
 )
@@ -119,28 +116,28 @@ function Remove-OldCopies([string] $directory) {
 }
 
 if ($Unregister) {
-    [void][Bangbang.InputSettings]::InstallLayoutOrTip($tip, 1)  # ILOT_UNINSTALL：從鍵盤清單移除
-    # 取消註冊目前註冊的 DLL（開發版或 Program Files 的安裝），找不到註冊時改用開發版的位置。
     $registered = @{
         x64 = Get-RegisteredPath ([Microsoft.Win32.RegistryView]::Registry64)
         x86 = Get-RegisteredPath ([Microsoft.Win32.RegistryView]::Registry32)
     }
+    # 目前註冊的是安裝版：交給安裝版自己的解除安裝（它也會移除「已安裝的應用程式」裡的項目與 Program Files 的檔案）。
+    if (($registered.x64 -and $registered.x64.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) -or
+        ($registered.x86 -and $registered.x86.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase))) {
+        Write-Host "目前註冊的是安裝版（$installRoot）：請從「設定 → 應用程式 → 已安裝的應用程式」解除安裝棒棒注音，或執行安裝包的 uninstall.cmd。" -ForegroundColor Yellow
+        return
+    }
+    [void][Bangbang.InputSettings]::InstallLayoutOrTip($tip, 1)  # ILOT_UNINSTALL：從鍵盤清單移除
     $arguments = @('-Unregister')
     foreach ($arch in 'x64', 'x86') {
         $path = if ($registered[$arch]) { $registered[$arch] } elseif (Test-Path $dlls[$arch]) { $dlls[$arch] } else { $null }
         if ($path) { $arguments += @("-Dll$($arch -replace 'x', '')", "`"$path`"") }
     }
-    if (Test-Path -LiteralPath $installRoot) { $arguments += @('-RemoveRoot', "`"$installRoot`"") }
     if ($arguments.Count -gt 1) {
         Write-Host '取消註冊（會跳出 UAC，請按「是」）…'
         $code = Invoke-Elevated $arguments
-        if ($code -eq 4) {
-            Write-Warning "$installRoot 裡有檔案還在使用中，沒有刪掉；關掉用過棒棒注音的程式後，再執行一次 -Unregister。"
-        } elseif ($code -ne 0) {
-            throw "取消註冊失敗（代碼 $code）"
-        }
+        if ($code -ne 0) { throw "取消註冊失敗（代碼 $code）" }
     }
-    Write-Host '已取消註冊。已經開著的程式要重新啟動，才會完全卸下棒棒注音。' -ForegroundColor Green
+    Write-Host '已取消註冊開發版。已經開著的程式要重新啟動，才會完全卸下棒棒注音。' -ForegroundColor Green
     return
 }
 
@@ -154,46 +151,36 @@ $model = Join-Path $repoRoot 'build\bangbang-v3.lm'
 if (-not (Test-Path $model)) { throw "找不到模型檔 $model" }
 $license = Join-Path $repoRoot 'data\mcbopomofo\LICENSE.txt'
 
-if ($Install) {
-    # 2. 安裝到 Program Files 並註冊（複製與註冊都需要系統管理員，一次 UAC）
-    $dlls = @{ x64 = Join-Path $installRoot 'x64\BangbangZhuyin.dll'; x86 = Join-Path $installRoot 'x86\BangbangZhuyin.dll' }
-    Write-Host "安裝 $Config 版到 $installRoot 並註冊（會跳出 UAC，請按「是」）…"
-    $code = Invoke-Elevated @('-InstallRoot', "`"$installRoot`"", '-SourceX64', "`"$($sources.x64)`"", '-SourceX86', "`"$($sources.x86)`"",
-                              '-Model', "`"$model`"", '-License', "`"$license`"", '-Dll64', "`"$($dlls.x64)`"", '-Dll86', "`"$($dlls.x86)`"")
-    if ($code -ne 0) { throw "安裝或註冊失敗（代碼 $code；3 是複製失敗，1／2 是 x64／x86 註冊失敗）" }
-    Write-Host "已安裝到 $installRoot 並註冊 x64 與 x86。"
-} else {
-    # 2. 部署到開發資料夾
-    foreach ($arch in 'x64', 'x86') {
-        Copy-Replacing $sources[$arch] $dlls[$arch]
-        Remove-OldCopies (Split-Path -Parent $dlls[$arch])
-    }
-    $deployedModel = Join-Path $devRoot 'bangbang.lm'
-    $modelChanged = -not (Test-Path $deployedModel)
-    if (-not $modelChanged) {
-        $a = Get-Item $model; $b = Get-Item $deployedModel
-        $modelChanged = $a.Length -ne $b.Length -or $a.LastWriteTimeUtc -ne $b.LastWriteTimeUtc
-    }
-    if ($modelChanged) { Copy-Replacing $model $deployedModel }
-    Remove-OldCopies $devRoot
-    Copy-Item -LiteralPath $license -Destination (Join-Path $devRoot 'McBopomofo-LICENSE.txt') -Force
-    # 讓 Microsoft Store 程式（沙盒）也讀得到 DLL 與模型：開放唯讀權限給「所有應用程式套件」與「所有受限應用程式套件」。
-    # 這是微軟 IME 規範要求的做法；安裝到 Program Files 時預設就有這個權限。
-    & icacls.exe $devRoot /grant '*S-1-15-2-1:(OI)(CI)(RX)' '*S-1-15-2-2:(OI)(CI)(RX)' /T /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { Write-Warning "無法設定 $devRoot 的讀取權限（icacls 代碼 $LASTEXITCODE），Store 程式裡可能無法使用棒棒注音。" }
-    Write-Host "已部署 $Config 版到 $devRoot"
+# 2. 部署到開發資料夾
+foreach ($arch in 'x64', 'x86') {
+    Copy-Replacing $sources[$arch] $dlls[$arch]
+    Remove-OldCopies (Split-Path -Parent $dlls[$arch])
+}
+$deployedModel = Join-Path $devRoot 'bangbang.lm'
+$modelChanged = -not (Test-Path $deployedModel)
+if (-not $modelChanged) {
+    $a = Get-Item $model; $b = Get-Item $deployedModel
+    $modelChanged = $a.Length -ne $b.Length -or $a.LastWriteTimeUtc -ne $b.LastWriteTimeUtc
+}
+if ($modelChanged) { Copy-Replacing $model $deployedModel }
+Remove-OldCopies $devRoot
+Copy-Item -LiteralPath $license -Destination (Join-Path $devRoot 'McBopomofo-LICENSE.txt') -Force
+# 讓 Microsoft Store 程式（沙盒）也讀得到 DLL 與模型：開放唯讀權限給「所有應用程式套件」與「所有受限應用程式套件」。
+# 這是微軟 IME 規範要求的做法；安裝到 Program Files 時預設就有這個權限。
+& icacls.exe $devRoot /grant '*S-1-15-2-1:(OI)(CI)(RX)' '*S-1-15-2-2:(OI)(CI)(RX)' /T /Q | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Warning "無法設定 $devRoot 的讀取權限（icacls 代碼 $LASTEXITCODE），Store 程式裡可能無法使用棒棒注音。" }
+Write-Host "已部署 $Config 版到 $devRoot"
 
-    # 3. 註冊（需要系統管理員）。已經用同一個位置、同一組類別註冊過就略過。
-    $registered = (Get-RegisteredPath ([Microsoft.Win32.RegistryView]::Registry64)) -eq $dlls.x64 -and
-                  (Get-RegisteredPath ([Microsoft.Win32.RegistryView]::Registry32)) -eq $dlls.x86 -and
-                  (Test-CategoriesMatch ([Microsoft.Win32.RegistryView]::Registry64)) -and
-                  (Test-CategoriesMatch ([Microsoft.Win32.RegistryView]::Registry32))
-    if ($ForceRegister -or -not $registered) {
-        Write-Host '向系統註冊棒棒注音（會跳出 UAC，請按「是」）…'
-        $code = Invoke-Elevated @('-Dll64', "`"$($dlls.x64)`"", '-Dll86', "`"$($dlls.x86)`"")
-        if ($code -ne 0) { throw "regsvr32 失敗（代碼 $code）" }
-        Write-Host '已註冊 x64 與 x86。'
-    }
+# 3. 註冊（需要系統管理員）。已經用同一個位置、同一組類別註冊過就略過。
+$registered = (Get-RegisteredPath ([Microsoft.Win32.RegistryView]::Registry64)) -eq $dlls.x64 -and
+              (Get-RegisteredPath ([Microsoft.Win32.RegistryView]::Registry32)) -eq $dlls.x86 -and
+              (Test-CategoriesMatch ([Microsoft.Win32.RegistryView]::Registry64)) -and
+              (Test-CategoriesMatch ([Microsoft.Win32.RegistryView]::Registry32))
+if ($ForceRegister -or -not $registered) {
+    Write-Host '向系統註冊棒棒注音（會跳出 UAC，請按「是」）…'
+    $code = Invoke-Elevated @('-Dll64', "`"$($dlls.x64)`"", '-Dll86', "`"$($dlls.x86)`"")
+    if ($code -ne 0) { throw "regsvr32 失敗（代碼 $code）" }
+    Write-Host '已註冊 x64 與 x86。'
 }
 
 # 4. 加進鍵盤清單

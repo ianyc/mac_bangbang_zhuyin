@@ -19,20 +19,34 @@ windows\scripts\build.ps1 -Arch x64 -NoTest  # 只建置 x64，不跑測試
 
 建置產物在 `windows/out/build/<x64|x86>/`，不納入 git。
 
-## 開發版註冊（在自己的電腦上試用）
+## 安裝版（日常使用、帶到別台電腦）
+
+```powershell
+windows\scripts\package.ps1                  # 建置 Release 版（x64、x86，並跑測試），做出安裝包
+windows\scripts\check-install.ps1            # 檢查目前的安裝狀態（只讀不改）
+```
+
+- 安裝包在 `windows\out\dist\BangbangZhuyin-<版本>-windows\`，旁邊有同名的 zip（約 56 MB）。版本號在 `windows/CMakeLists.txt` 的 `project(VERSION)`。
+- **安裝、更新**：雙擊安裝包裡的 `install.cmd`，會跳出一次 UAC。
+  - 檔案安裝到 `C:\Program Files\BangbangZhuyin`，註冊 x64 與 x86，加進鍵盤清單，並登錄到「設定 → 應用程式 → 已安裝的應用程式」。
+  - 更新時，正在被程式使用的舊檔先改名成 `*.old-時間`，重新開機時自動刪除。已經開著的程式要重新啟動才會用新版。
+- **解除安裝**：從「已安裝的應用程式」解除安裝，或雙擊 `uninstall.cmd`。選字記憶（`%APPDATA%\BangbangZhuyin`）會保留。
+- 只有安裝在 Program Files 這種一般使用者改不了的位置時，DLL 才會註冊 SECUREMODE 類別（允許在登入畫面這類以系統身分執行的地方載入）。放在使用者資料夾時註冊它，等於讓任何程式都能換掉 DLL 來取得系統權限。
+- 安裝包裡的使用說明是 `windows/package/README.txt`；安裝與解除安裝腳本也在 `windows/package/`。
+
+## 開發版註冊（改程式時用）
 
 ```powershell
 windows\scripts\build.ps1                    # 先建置
 windows\scripts\register.ps1                 # 部署到 windows\out\deploy 並註冊（第一次要按 UAC）
-windows\scripts\register.ps1 -Install        # 改安裝到 Program Files\BangbangZhuyin 並註冊（每次都要按 UAC）
-windows\scripts\register.ps1 -Unregister     # 從鍵盤清單移除、取消註冊，並刪除 Program Files 裡的安裝
+windows\scripts\register.ps1 -Unregister     # 從鍵盤清單移除，並取消註冊開發版
 ```
 
+- 開發版和安裝版註冊的是同一個輸入法，後註冊的會取代先註冊的：執行 `register.ps1` 會改回開發版，執行安裝包的 `install.cmd` 會改成安裝版。目前註冊的是安裝版時，`-Unregister` 不會動它，請用安裝版的解除安裝。
 - 之後改了程式，重新建置再執行 `register.ps1` 就好：只會更新檔案，不用再按 UAC（註冊的位置或類別改變時才會再跳出）。已經開著的程式要重新啟動才會用到新版；Chrome、Edge 關掉視窗後常常還有背景程序，要整個結束（或重新開機）。檔案總管、開始功能表搜尋要登出或重新開機。
 - 用 Win + 空白鍵切換到「棒棒注音」。
 - 開發版放在 `windows\out\deploy`（不納入 git；刪掉 `out` 資料夾後要重新執行 `register.ps1`）。腳本會開放唯讀權限給 Microsoft Store 程式（沙盒）。
-- 不放在 `%LOCALAPPDATA%`：從 MSIX 封裝程式（例如 Claude 桌面版的終端機）裡執行時，新建在 AppData 的檔案會被轉存到那個程式的私有資料夾（`%LOCALAPPDATA%\Packages\<程式>\LocalCache`），其他程式找不到 DLL，只好改用微軟注音。
-- `-Install` 的位置和正式安裝相同。只有放在這種一般使用者改不了的位置，DLL 才會註冊 SECUREMODE 類別（允許在登入畫面這類以系統身分執行的地方載入）；放在使用者資料夾時註冊它，等於讓任何程式都能換掉 DLL 來取得系統權限。之後不加 `-Install` 執行，會改回註冊開發版。
+- 不放在 `%LOCALAPPDATA%`：從 MSIX 封裝程式（例如 Claude 桌面版的終端機）裡執行時，在 AppData 新建的資料夾會被轉存到那個程式的私有資料夾（`%LOCALAPPDATA%\Packages\<程式>\LocalCache`），其他程式找不到 DLL，只好改用微軟注音。
 
 ## 中英切換與組字區
 
@@ -137,7 +151,9 @@ engine/        選字引擎（不依賴 TSF，可單獨測試）← 對應 Sourc
 tip/           TSF 外殼 BangbangZhuyin.dll ← 對應 Sources/BangbangZhuyin/
 tool/          bangbang-tool.exe：評測、除錯、模擬按鍵 ← 對應 Sources/bangbang-tool/
 tests/         單元測試（GoogleTest）
-scripts/       建置、註冊、安裝腳本
+testpad/       testpad.exe：手動與自動測試 TSF 輸入法
+scripts/       建置、開發版註冊、做安裝包、檢查安裝狀態、產生圖示
+package/       安裝包裡的檔案：install／uninstall（.cmd 與 .ps1）、給使用者的 README.txt
 third_party/   nlohmann/json 3.12.0（MIT）
 ```
 
