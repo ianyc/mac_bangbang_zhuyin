@@ -1224,10 +1224,11 @@ HRESULT captureWindow(HWND hwnd, const std::filesystem::path& path) {
 }
 
 /// --time-candidates steps [software]：把候選窗第一次顯示拆成各步驟量時間（自己照輸入法的步驟做一次）。
-/// --time-candidates window [capture <PNG 檔>]：用輸入法真正的 CandidateWindow，量第一次與第二次從顯示到畫好的時間；
+/// --time-candidates window [bitmap] [capture <PNG 檔>]：用輸入法真正的 CandidateWindow，量第一次與第二次從顯示到畫好的時間；
+/// 加上 bitmap 時走沉浸式程式（工作列搜尋）用的路徑：畫在 WIC 點陣圖上再貼到視窗；
 /// 加上 capture 時把螢幕上的候選窗存成圖片。
 /// 每次都要在新的程序裡執行，量到的才是「新開的程式第一次選字」。
-int timeCandidates(const std::wstring& mode, bool software, const std::filesystem::path& capture) {
+int timeCandidates(const std::wstring& mode, bool software, bool bitmap, const std::filesystem::path& capture) {
     using Clock = std::chrono::steady_clock;
     auto last = Clock::now();
     const auto lap = [&](const char* what) {
@@ -1240,8 +1241,9 @@ int timeCandidates(const std::wstring& mode, bool software, const std::filesyste
     const RECT anchor{300, 300, 360, 330};
 
     if (mode == L"window") {
-        std::printf("輸入法的候選窗（%ls）：\n", kArch);
+        std::printf("輸入法的候選窗（%ls，%s）：\n", kArch, bitmap ? "畫在點陣圖上再貼到視窗" : "HWND 繪圖目標");
         CandidateWindow window;
+        if (bitmap) window.forceBitmapTarget();
         last = Clock::now();
         window.show(page, anchor, nullptr);
         lap("第一次 show()");
@@ -1332,10 +1334,16 @@ int wmain(int argc, wchar_t** argv) {
             return code;
         } else if (arg == L"--time-candidates") {
             const std::wstring mode = i + 1 < argc ? argv[i + 1] : L"steps";
-            const std::wstring option = i + 2 < argc ? argv[i + 2] : L"";
-            const std::filesystem::path capture = option == L"capture" && i + 3 < argc ? argv[i + 3] : L"";
+            bool software = false, bitmap = false;
+            std::filesystem::path capture;
+            for (int j = i + 2; j < argc; ++j) {
+                const std::wstring option = argv[j];
+                if (option == L"software") software = true;
+                if (option == L"bitmap") bitmap = true;
+                if (option == L"capture" && j + 1 < argc) capture = argv[++j];
+            }
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-            const int code = timeCandidates(mode, option == L"software", capture);
+            const int code = timeCandidates(mode, software, bitmap, capture);
             CoUninitialize();
             return code;
         } else if (arg == L"--lm" && i + 1 < argc) {

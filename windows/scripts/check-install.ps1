@@ -51,18 +51,25 @@ if (Test-Path -LiteralPath $installRoot) {
 }
 
 Write-Host '== 已安裝的應用程式'
-$uninstall = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\BangbangZhuyin' -ErrorAction SilentlyContinue
-if ($uninstall) {
-    Write-Host "  $($uninstall.DisplayName) $($uninstall.DisplayVersion)，$($uninstall.EstimatedSize) KB，安裝日期 $($uninstall.InstallDate)"
-    Write-Host "  解除安裝：$($uninstall.UninstallString)"
-} else {
-    Write-Host '  （沒有項目）'
+# MSI 安裝的項目以產品代碼（{GUID}）為名；以前用 PowerShell 腳本安裝的項目叫 BangbangZhuyin。
+$entries = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+    Where-Object { (Get-ItemProperty -LiteralPath $_.PSPath -Name DisplayName -ErrorAction SilentlyContinue).DisplayName -eq '棒棒注音' })
+foreach ($entry in $entries) {
+    $p = Get-ItemProperty -LiteralPath $entry.PSPath
+    $kind = if ($entry.PSChildName -like '{*}') { "MSI，產品代碼 $($entry.PSChildName)" } else { '舊的 PowerShell 腳本安裝' }
+    Write-Host "  $($p.DisplayName) $($p.DisplayVersion)（$kind），安裝日期 $($p.InstallDate)"
+    Write-Host "  解除安裝：$($p.UninstallString)"
 }
+if (-not $entries.Count) { Write-Host '  （沒有項目）' }
 
 Write-Host '== 重新開機時要刪除的檔案'
 $pending = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations
 $ours = @($pending | Where-Object { $_ -match 'BangbangZhuyin' })
-if ($ours.Count) { $ours | ForEach-Object { Write-Host "  $_" } } else { Write-Host '  （沒有）' }
+# MSI 更新或解除安裝時，還在使用的舊檔會移到 C:\Config.Msi\*.rbf，重新開機時刪除。檔名看不出是哪個 MSI 留下的。
+$msiBackups = @($pending | Where-Object { $_ -match '\\Config\.Msi\\' })
+$ours | ForEach-Object { Write-Host "  $_" }
+if ($msiBackups.Count) { Write-Host "  Windows Installer 移開的使用中舊檔：$($msiBackups.Count) 個（在 C:\Config.Msi，不一定是棒棒注音的）" }
+if ($ours.Count + $msiBackups.Count -eq 0) { Write-Host '  （沒有）' }
 
 Write-Host '== 鍵盤清單（目前的使用者）'
 $tipId = "0404:$clsid$profileGuid"

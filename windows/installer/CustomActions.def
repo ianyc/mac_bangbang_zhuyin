@@ -1,0 +1,4 @@
+LIBRARY BangbangSetup
+EXPORTS
+    AddToKeyboardList
+    RemoveFromKeyboardList

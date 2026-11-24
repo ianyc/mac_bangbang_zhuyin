@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  棒棒注音的 MSI 安裝檔（WiX v6）。由 windows\scripts\package.ps1 建置，不要直接執行 wix。
+  傳進來的變數：
+    Version    版本號（windows/CMakeLists.txt 的 project(VERSION)）
+    SourceDir  要安裝的檔案：x64\、x86\ 的 BangbangZhuyin.dll、bangbang.lm、README.txt、McBopomofo-LICENSE.txt
+    SetupDll   自訂動作 DLL（windows/installer/CustomActions.cpp）
+    IconFile   「已安裝的應用程式」裡的圖示
+  安裝位置固定在 Program Files\BangbangZhuyin：只有放在一般使用者改不了的位置，DLL 才會註冊 SECUREMODE，
+  所以不讓使用者改安裝位置。
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="棒棒注音" Manufacturer="棒棒注音" Version="$(var.Version)" Language="1028" Codepage="950"
+           UpgradeCode="{73FFA847-5034-44E9-AB8C-A6793D6A5146}" Scope="perMachine" InstallerVersion="500">
+    <SummaryInformation Description="棒棒注音（標準大千注音輸入法）" Manufacturer="棒棒注音" />
+
+    <!-- 安裝新版（或重新安裝同一版）時，先移除舊版再裝新版。 -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="已經安裝了較新版的棒棒注音。要改裝這個版本，請先解除安裝。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="BangbangZhuyin.ico" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="BangbangZhuyin.ico" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPCOMMENTS" Value="標準大千注音輸入法，整句選字，記住手動選過的字。" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="按 Win + 空白鍵切換到「棒棒注音」。已經開著的程式要重新啟動才會用到。" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="BangbangZhuyin">
+        <Directory Id="X64FOLDER" Name="x64" />
+        <Directory Id="X86FOLDER" Name="x86" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <Component Directory="X64FOLDER">
+        <File Id="Dll64" Source="$(var.SourceDir)\x64\BangbangZhuyin.dll" KeyPath="yes" />
+      </Component>
+      <!-- 32 位元的 DLL 也只是一個檔案（這個元件沒有登錄值），所以元件本身不必標成 32 位元（ICE80）。 -->
+      <Component Directory="X86FOLDER">
+        <File Id="Dll86" Source="$(var.SourceDir)\x86\BangbangZhuyin.dll" KeyPath="yes" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Id="Model" Source="$(var.SourceDir)\bangbang.lm" KeyPath="yes" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Id="Readme" Source="$(var.SourceDir)\README.txt" KeyPath="yes" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Id="License" Source="$(var.SourceDir)\McBopomofo-LICENSE.txt" KeyPath="yes" />
+      </Component>
+      <!-- 清掉以前用 PowerShell 腳本（install.cmd）安裝留下的東西：「已安裝的應用程式」的舊項目、解除安裝腳本、
+           更新時改名的舊檔。之後的更新留下的舊檔也一併清掉。 -->
+      <Component Id="Cleanup" Directory="INSTALLFOLDER" Guid="{307AD943-7262-4DB1-80DD-92E6F34377D6}">
+        <CreateFolder />
+        <RemoveFile Id="LegacyUninstallScript" Name="uninstall.ps1" On="install" />
+        <RemoveFile Id="OldFilesRoot" Name="*.old-*" On="both" />
+        <RemoveFile Id="OldFiles64" Directory="X64FOLDER" Name="*.old-*" On="both" />
+        <RemoveFile Id="OldFiles86" Directory="X86FOLDER" Name="*.old-*" On="both" />
+        <RemoveRegistryKey Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\BangbangZhuyin" Action="removeOnInstall" />
+      </Component>
+    </Feature>
+
+    <!-- 註冊與取消註冊（COM 與 TSF 語言設定檔）：64 位元與 32 位元的 regsvr32，以系統身分執行。
+         在 64 位元的 MSI 裡，System64Folder 是 System32，SystemFolder 是 SysWOW64。 -->
+    <CustomAction Id="Register64" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
+                  ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s &quot;[INSTALLFOLDER]x64\BangbangZhuyin.dll&quot;" />
+    <CustomAction Id="Register86" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="check"
+                  ExeCommand="&quot;[SystemFolder]regsvr32.exe&quot; /s &quot;[INSTALLFOLDER]x86\BangbangZhuyin.dll&quot;" />
+    <!-- 安裝失敗、復原時取消註冊。 -->
+    <CustomAction Id="Register64Rollback" Directory="INSTALLFOLDER" Execute="rollback" Impersonate="no" Return="ignore"
+                  ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[INSTALLFOLDER]x64\BangbangZhuyin.dll&quot;" />
+    <CustomAction Id="Register86Rollback" Directory="INSTALLFOLDER" Execute="rollback" Impersonate="no" Return="ignore"
+                  ExeCommand="&quot;[SystemFolder]regsvr32.exe&quot; /s /u &quot;[INSTALLFOLDER]x86\BangbangZhuyin.dll&quot;" />
+    <CustomAction Id="Unregister64" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+                  ExeCommand="&quot;[System64Folder]regsvr32.exe&quot; /s /u &quot;[INSTALLFOLDER]x64\BangbangZhuyin.dll&quot;" />
+    <CustomAction Id="Unregister86" Directory="INSTALLFOLDER" Execute="deferred" Impersonate="no" Return="ignore"
+                  ExeCommand="&quot;[SystemFolder]regsvr32.exe&quot; /s /u &quot;[INSTALLFOLDER]x86\BangbangZhuyin.dll&quot;" />
+
+    <!-- 鍵盤清單是每個使用者自己的設定：以使用者身分立即執行。 -->
+    <Binary Id="SetupDll" SourceFile="$(var.SetupDll)" />
+    <CustomAction Id="AddToKeyboardList" BinaryRef="SetupDll" DllEntry="AddToKeyboardList" Execute="immediate" Return="ignore" />
+    <CustomAction Id="RemoveFromKeyboardList" BinaryRef="SetupDll" DllEntry="RemoveFromKeyboardList" Execute="immediate" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- 解除安裝：先移出鍵盤清單，再取消註冊、刪除檔案。
+           升級時移除舊版不算解除安裝：不移出鍵盤清單，也不取消註冊。新版裝在同一個位置，裝好後再註冊一次，
+           升級途中輸入法一直是註冊的（和以前的腳本更新一樣）。 -->
+      <Custom Action="RemoveFromKeyboardList" Before="InstallInitialize" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="Unregister64" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="Unregister86" After="Unregister64" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <!-- 安裝、修復、升級：複製檔案後註冊，完成後加進鍵盤清單。 -->
+      <Custom Action="Register64Rollback" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="Register64" After="Register64Rollback" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="Register86Rollback" After="Register64" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="Register86" After="Register86Rollback" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="AddToKeyboardList" After="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <!-- 安裝精靈：歡迎 → 準備安裝 → 安裝進度 → 完成。沒有選安裝位置、沒有授權同意頁。
+         已經安裝時開啟 MSI：修復或移除。 -->
+    <UI Id="BangbangUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="!(loc.Advanced_Font_FaceName)" Size="!(loc.Advanced_Font_Normal_Size)" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="!(loc.Advanced_Font_FaceName)" Size="!(loc.Advanced_Font_Bigger_Size)" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="!(loc.Advanced_Font_FaceName)" Size="!(loc.Advanced_Font_Title_Size)" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="WelcomeDlg" />
+      <DialogRef Id="VerifyReadyDlg" />
+      <DialogRef Id="MaintenanceWelcomeDlg" />
+      <DialogRef Id="MaintenanceTypeDlg" />
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed" />
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+    </UI>
+    <UIRef Id="WixUI_Common" />
+    <!-- 有程式正在使用輸入法時（「檔案使用中」對話框），預設改成「不關閉應用程式」。
+         WixUI 原本預設自動關閉，會把所有載入過輸入法的程式都關掉（包括檔案總管）；
+         輸入法不必關掉程式也能更新，已經開著的程式重新開啟後才會用到新版。 -->
+    <SetProperty Id="WixUIRMOption" Value="DontUseRM" Before="CostInitialize" Sequence="ui" />
+  </Package>
+</Wix>

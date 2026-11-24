@@ -19,6 +19,11 @@ namespace {
 std::mutex g_classMutex;
 ATOM g_class = 0;
 
+// WIC 的 GUID 自己留一份，不連結 windowscodecs.lib：輸入法 DLL 載入到每個程式時不會跟著載入 windowscodecs.dll，
+// 只有沉浸式程式第一次畫候選窗時才經由 CoCreateInstance 載入。
+constexpr CLSID kWicFactoryClsid = {0xcacaf262, 0x9370, 0x4615, {0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a}};  // CLSID_WICImagingFactory1
+constexpr GUID kWicFormatPbgra = {0x6fddc324, 0x4e03, 0x4bfe, {0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x10}};    // GUID_WICPixelFormat32bppPBGRA
+
 }  // namespace
 
 LRESULT CALLBACK candidateWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -105,6 +110,7 @@ bool CandidateWindow::ensureWindow(HWND owner) {
 }
 
 bool CandidateWindow::createTarget() {
+    if (useBitmap_) return true;  // 點陣圖在 paintBitmap 依視窗大小建立
     // 用軟體繪製：候選窗很小，CPU 畫一次只要 1～4 ms。用顯示卡的話，每個程式第一次建立 Direct3D 裝置
     // 要將近 0.2 秒，新開的程式第一次選字時會先看到空白的候選窗（2026-11-22 用 testpad --time-candidates 實測）；
     // 每次畫完還要等螢幕的垂直同步。
@@ -115,9 +121,13 @@ bool CandidateWindow::createTarget() {
     const auto size = D2D1::SizeU(static_cast<UINT32>(std::max(1L, client.right - client.left)),
                                   static_cast<UINT32>(std::max(1L, client.bottom - client.top)));
     const auto hwndProperties = D2D1::HwndRenderTargetProperties(hwnd_, size, D2D1_PRESENT_OPTIONS_IMMEDIATELY);
-    if (FAILED(d2d_->CreateHwndRenderTarget(properties, hwndProperties, &target_))) {
-        debugLog(L"棒棒注音：無法建立候選窗的繪圖目標");
-        return false;
+    const HRESULT hr = d2d_->CreateHwndRenderTarget(properties, hwndProperties, &target_);
+    if (FAILED(hr)) {
+        // 沉浸式程式不能用 HWND 的繪圖目標：Windows 11 的工作列搜尋每次都失敗，候選窗只剩 DWM 畫的邊框與陰影
+        // （2026-11-24 使用者回報、用偵錯記錄確認）。改畫在點陣圖上。
+        debugLog(L"棒棒注音：無法建立候選窗的繪圖目標（0x%08lX），改畫在點陣圖上", static_cast<unsigned long>(hr));
+        useBitmap_ = true;
+        return true;
     }
     // 灰階反鋸齒（同 Windows 11 的微軟注音與系統介面）：ClearType 在細筆畫的字邊緣會帶顏色。
     target_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -201,7 +211,7 @@ bool CandidateWindow::isShown() const {
 void CandidateWindow::paint() {
     PAINTSTRUCT ps;
     BeginPaint(hwnd_, &ps);
-    if (!target_) createTarget();  // 上次畫的時候要求重建
+    if (!target_ && !useBitmap_) createTarget();  // 上次畫的時候要求重建
     if (target_) {
         target_->BeginDraw();
         renderer_.draw(target_.Get(), page_, theme_);
@@ -209,8 +219,62 @@ void CandidateWindow::paint() {
             target_.Reset();  // 顯示卡重設了：下次重畫時重建
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
+    } else if (useBitmap_) {
+        paintBitmap(ps.hdc);
     }
     EndPaint(hwnd_, &ps);
+}
+
+void CandidateWindow::paintBitmap(HDC dc) {
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    const UINT width = static_cast<UINT>(std::max(1L, client.right - client.left));
+    const UINT height = static_cast<UINT>(std::max(1L, client.bottom - client.top));
+    UINT bitmapWidth = 0, bitmapHeight = 0;
+    if (bitmap_) bitmap_->GetSize(&bitmapWidth, &bitmapHeight);
+    if (!bitmapTarget_ || bitmapWidth != width || bitmapHeight != height) {
+        bitmapTarget_.Reset();
+        bitmap_.Reset();
+        HRESULT hr = wic_ ? S_OK : CoCreateInstance(kWicFactoryClsid, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_));
+        if (SUCCEEDED(hr)) hr = wic_->CreateBitmap(width, height, kWicFormatPbgra, WICBitmapCacheOnLoad, &bitmap_);
+        if (SUCCEEDED(hr)) {
+            const auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                                                                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            hr = d2d_->CreateWicBitmapRenderTarget(bitmap_.Get(), properties, &bitmapTarget_);
+        }
+        if (FAILED(hr)) {
+            debugLog(L"棒棒注音：無法建立候選窗的點陣圖（0x%08lX）", static_cast<unsigned long>(hr));
+            bitmapTarget_.Reset();
+            bitmap_.Reset();
+            return;
+        }
+        bitmapTarget_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    }
+    bitmapTarget_->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
+    bitmapTarget_->BeginDraw();
+    renderer_.draw(bitmapTarget_.Get(), page_, theme_);
+    const HRESULT drawn = bitmapTarget_->EndDraw();
+    if (FAILED(drawn)) {
+        debugLog(L"棒棒注音：候選窗的點陣圖畫不出來（0x%08lX）", static_cast<unsigned long>(drawn));
+        bitmapTarget_.Reset();  // 下次重畫時重建
+        return;
+    }
+    const WICRect area{0, 0, static_cast<INT>(width), static_cast<INT>(height)};
+    ComPtr<IWICBitmapLock> lock;
+    UINT stride = 0, size = 0;
+    BYTE* pixels = nullptr;
+    if (FAILED(bitmap_->Lock(&area, WICBitmapLockRead, &lock)) || FAILED(lock->GetStride(&stride)) ||
+        FAILED(lock->GetDataPointer(&size, &pixels)) || !pixels) {
+        return;
+    }
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = static_cast<LONG>(stride / 4);  // 32 位元：每列 stride 個位元組
+    info.bmiHeader.biHeight = -static_cast<LONG>(height);    // 負的：由上而下
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    SetDIBitsToDevice(dc, 0, 0, width, height, 0, 0, 0, height, pixels, &info, DIB_RGB_COLORS);
 }
 
 LRESULT CandidateWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {

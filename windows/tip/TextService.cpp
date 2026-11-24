@@ -940,6 +940,7 @@ void TextService::beginCandidateUI() {
     }
     // 程式以「只用 UI-less」啟用 TSF 時，一定由程式自己畫。
     if (activateFlags_ & TF_TMAE_UIELEMENTENABLEDONLY) candidateWindowAllowed_ = false;
+    traceLog(L"候選字：%ls（啟用旗標 0x%08lX）", candidateWindowAllowed_ ? L"輸入法自己畫候選窗" : L"程式自己畫（UI-less）", activateFlags_);
 }
 
 void TextService::publishCandidateUI(bool opened) {

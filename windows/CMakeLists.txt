@@ -36,6 +36,7 @@ add_subdirectory(engine)
 add_subdirectory(tip)
 add_subdirectory(tool)
 add_subdirectory(testpad)
+add_subdirectory(installer)
 
 option(BANGBANG_BUILD_TESTS "建置單元測試（第一次設定時會下載 GoogleTest）" ON)
 if(BANGBANG_BUILD_TESTS)

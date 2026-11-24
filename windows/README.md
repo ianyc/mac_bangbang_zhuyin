@@ -22,17 +22,29 @@ windows\scripts\build.ps1 -Arch x64 -NoTest  # 只建置 x64，不跑測試
 ## 安裝版（日常使用、帶到別台電腦）
 
 ```powershell
-windows\scripts\package.ps1                  # 建置 Release 版（x64、x86，並跑測試），做出安裝包
+windows\scripts\package.ps1                  # 建置 Release 版（x64、x86，並跑測試），做出 MSI 安裝檔
 windows\scripts\check-install.ps1            # 檢查目前的安裝狀態（只讀不改）
 ```
 
-- 安裝包在 `windows\out\dist\BangbangZhuyin-<版本>-windows\`，旁邊有同名的 zip（約 56 MB）。版本號在 `windows/CMakeLists.txt` 的 `project(VERSION)`。
-- **安裝、更新**：雙擊安裝包裡的 `install.cmd`，會跳出一次 UAC。
-  - 檔案安裝到 `C:\Program Files\BangbangZhuyin`，註冊 x64 與 x86，加進鍵盤清單，並登錄到「設定 → 應用程式 → 已安裝的應用程式」。
-  - 更新時，正在被程式使用的舊檔先改名成 `*.old-時間`，重新開機時自動刪除。已經開著的程式要重新啟動才會用新版。
-- **解除安裝**：從「已安裝的應用程式」解除安裝，或雙擊 `uninstall.cmd`。選字記憶（`%APPDATA%\BangbangZhuyin`）會保留。
+- 安裝檔是 `windows\out\dist\BangbangZhuyin-<版本>.msi`（約 49 MB）。版本號在 `windows/CMakeLists.txt` 的 `project(VERSION)`。
+- 用 WiX v6 建置，設定在 `windows/installer/BangbangZhuyin.wxs`。第一次要先裝 .NET SDK（6 以上）與 WiX：
+  ```powershell
+  dotnet tool install --global wix --version 6.0.2
+  wix extension add -g WixToolset.UI.wixext/6.0.2
+  ```
+- **安裝**：雙擊 .msi，安裝精靈依序是：歡迎 → 準備安裝 → 進度 → 完成。會跳出一次 UAC。
+  - 檔案裝到 `C:\Program Files\BangbangZhuyin`，位置固定不能改。
+  - 用 regsvr32 註冊 x64 與 x86 的 DLL。
+  - 以使用者自己的身分加進鍵盤清單（自訂動作 `windows/installer/CustomActions.cpp`）。
+  - 出現在「設定 → 應用程式 → 已安裝的應用程式」。
+- **更新**：雙擊新的 .msi，會先移除舊版再裝新版。
+  - 每次建置都有新的產品代碼，所以同一版本號重新建置的也能升級。
+  - 移除舊版時不取消註冊、不移出鍵盤清單；新版裝在同一個位置，裝好後再註冊一次。
+  - 有程式正在使用輸入法時會出現「檔案使用中」，預設選「不關閉應用程式」（WixUI 原本預設自動關閉，會把打過字的程式都關掉）。已經開著的程式重新開啟後才會用到新版。
+  - 也可能出現「…將需要重新開機」（錯誤 1610）：安裝紀錄顯示是安裝程式自己的視窗也載入了輸入法，它關不掉自己。按確定繼續即可，新檔當場就換上了；使用中的舊檔移到 `C:\Config.Msi`，下次開機刪除。
+- **解除安裝**：從「已安裝的應用程式」解除安裝，或雙擊同一個 .msi 選「移除」。選字記憶（`%APPDATA%\BangbangZhuyin`）會保留。
 - 只有安裝在 Program Files 這種一般使用者改不了的位置時，DLL 才會註冊 SECUREMODE 類別（允許在登入畫面這類以系統身分執行的地方載入）。放在使用者資料夾時註冊它，等於讓任何程式都能換掉 DLL 來取得系統權限。
-- 安裝包裡的使用說明是 `windows/package/README.txt`；安裝與解除安裝腳本也在 `windows/package/`。
+- 安裝在 Program Files 裡的使用說明是 `windows/package/README.txt`。
 
 ## 開發版註冊（改程式時用）
 
@@ -42,7 +54,7 @@ windows\scripts\register.ps1                 # 部署到 windows\out\deploy 並�
 windows\scripts\register.ps1 -Unregister     # 從鍵盤清單移除，並取消註冊開發版
 ```
 
-- 開發版和安裝版註冊的是同一個輸入法，後註冊的會取代先註冊的：執行 `register.ps1` 會改回開發版，執行安裝包的 `install.cmd` 會改成安裝版。目前註冊的是安裝版時，`-Unregister` 不會動它，請用安裝版的解除安裝。
+- 開發版和安裝版註冊的是同一個輸入法，後註冊的會取代先註冊的：執行 `register.ps1` 會改回開發版，安裝 MSI（或修復）會改成安裝版。目前註冊的是安裝版時，`-Unregister` 不會動它，請用安裝版的解除安裝。
 - 之後改了程式，重新建置再執行 `register.ps1` 就好：只會更新檔案，不用再按 UAC（註冊的位置或類別改變時才會再跳出）。已經開著的程式要重新啟動才會用到新版；Chrome、Edge 關掉視窗後常常還有背景程序，要整個結束（或重新開機）。檔案總管、開始功能表搜尋要登出或重新開機。
 - 用 Win + 空白鍵切換到「棒棒注音」。
 - 開發版放在 `windows\out\deploy`（不納入 git；刪掉 `out` 資料夾後要重新執行 `register.ps1`）。腳本會開放唯讀權限給 Microsoft Store 程式（沙盒）。
@@ -112,6 +124,7 @@ windows\out\build\x64\testpad\Debug\testpad.exe --render-candidates <資料夾> 
 windows\out\build\x64\testpad\Debug\testpad.exe --time-candidates window      # 量候選窗第一次、第二次顯示花的時間
 windows\out\build\x64\testpad\Debug\testpad.exe --time-candidates steps       # 把第一次顯示拆成各步驟量時間（加 software 改用軟體繪製）
 windows\out\build\x64\testpad\Debug\testpad.exe --time-candidates window capture <PNG 檔>   # 另外擷取螢幕上的候選窗
+windows\out\build\x64\testpad\Debug\testpad.exe --time-candidates window bitmap capture <PNG 檔>   # 走沉浸式程式用的路徑（畫在點陣圖上）
 ```
 
 - 自動測試只在 testpad 自己的視窗裡啟用棒棒注音；需要先執行 `register.ps1`。也會檢查候選窗（是否顯示、位置、不搶焦點、UI 元件內容）、UI-less 模式、中英切換與跨程式的選字記憶。
@@ -119,6 +132,13 @@ windows\out\build\x64\testpad\Debug\testpad.exe --time-candidates window capture
 - `--time-candidates` 要每次在新的程式裡執行，量到的才是「新開的程式第一次選字」；它用的是和輸入法同一份候選窗程式。
 - 中英狀態是所有程式共用的：測試中會暫時切換它（其他程式也會跟著變），測完還原成測試前的狀態。
 - 按鍵要送到輸入法，測試視窗必須在前景。剛操作過電腦時，Windows 不讓背景程式搶焦點，這時按鍵測試會全部標成「略過」：請在自己的終端機執行，跑的時候不要動鍵盤滑鼠。
+
+## 偵錯記錄
+
+- 輸入法的除錯訊息用 `OutputDebugString` 輸出，DebugView 或 Visual Studio 的「輸出」視窗看得到。
+- 沙盒程式（例如工作列搜尋）的訊息收不到：在那個程式的暫存資料夾放一個 `bangbang-debug.flag`（內容不拘），重新啟動那個程式（或重新開機）後，記錄會寫到同一個資料夾的 `bangbang-debug.log`。查完把兩個檔案都刪掉。
+  - 工作列搜尋：`%LOCALAPPDATA%\Packages\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\AC\Temp`
+  - 一般程式：`%TEMP%`（所有一般程式共用，記錄會混在一起）
 
 ## 開發工具 bangbang-tool
 
@@ -152,8 +172,9 @@ tip/           TSF 外殼 BangbangZhuyin.dll ← 對應 Sources/BangbangZhuyin/
 tool/          bangbang-tool.exe：評測、除錯、模擬按鍵 ← 對應 Sources/bangbang-tool/
 tests/         單元測試（GoogleTest）
 testpad/       testpad.exe：手動與自動測試 TSF 輸入法
-scripts/       建置、開發版註冊、做安裝包、檢查安裝狀態、產生圖示
-package/       安裝包裡的檔案：install／uninstall（.cmd 與 .ps1）、給使用者的 README.txt
+scripts/       建置、開發版註冊、做安裝檔、檢查安裝狀態、產生圖示
+installer/     MSI 安裝檔：WiX 設定（BangbangZhuyin.wxs）與自訂動作 DLL（加進鍵盤清單）
+package/       裝到 Program Files 的使用說明 README.txt
 third_party/   nlohmann/json 3.12.0（MIT）
 ```
 

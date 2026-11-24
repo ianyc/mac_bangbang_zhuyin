@@ -7,9 +7,11 @@
 // - Windows 11 圓角；跟隨系統的淺色／深色與強調色；顯示、隱藏、內容改變時送出 EVENT_OBJECT_IME_*。
 // - Direct2D 軟體繪製：不必在每個程式裡初始化顯示卡（第一次要將近 0.2 秒）。顯示時同步畫好；
 //   從隱藏變成顯示時先 cloak、畫好再現身，第一次選字也不會先看到空白的視窗。
+// - 沉浸式程式（例如工作列搜尋）不能用 HWND 的繪圖目標：改畫在記憶體裡的點陣圖（WIC），再用 GDI 貼到視窗。
 
 #include <windows.h>
 #include <d2d1.h>
+#include <wincodec.h>
 #include <wrl/client.h>
 
 #include <functional>
@@ -37,6 +39,8 @@ public:
     bool isShown() const;
     HWND hwnd() const { return hwnd_; }
     void setClickHandler(ClickHandler handler) { onClick_ = std::move(handler); }
+    /// testpad 用：第一次顯示前呼叫，不用 HWND 的繪圖目標，直接走沉浸式程式的路徑。
+    void forceBitmapTarget() { useBitmap_ = true; }
 
     /// 視窗類別名稱（testpad 用來找視窗）。
     static constexpr const wchar_t* kClassName = L"BangbangZhuyinCandidateWindow";
@@ -50,6 +54,8 @@ private:
     void cloak(bool hidden);
     void place();
     void paint();
+    /// 畫在 WIC 點陣圖上（大小跟著視窗），再用 SetDIBitsToDevice 貼到 dc。
+    void paintBitmap(HDC dc);
     UINT dpiFor(const RECT& anchor) const;
     LRESULT handleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     friend LRESULT CALLBACK candidateWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -62,6 +68,11 @@ private:
     CandidateRenderer renderer_;
     Microsoft::WRL::ComPtr<ID2D1Factory> d2d_;
     Microsoft::WRL::ComPtr<ID2D1HwndRenderTarget> target_;
+    // 沉浸式程式用的繪圖目標（useBitmap_ 時）。
+    bool useBitmap_ = false;
+    Microsoft::WRL::ComPtr<IWICImagingFactory> wic_;
+    Microsoft::WRL::ComPtr<IWICBitmap> bitmap_;
+    Microsoft::WRL::ComPtr<ID2D1RenderTarget> bitmapTarget_;
     ClickHandler onClick_;
 };
 
