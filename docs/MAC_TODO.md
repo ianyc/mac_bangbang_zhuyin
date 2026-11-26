@@ -141,3 +141,26 @@ Windows 版的實作可以參考：
   - Windows 引擎為了讓移植的測試照 Mac 舊規格跑，保留了 `Punctuation::Style::Mac`。
   - `windows/tests/EngineTests.cpp` 裡的移植測試也還是舊預期。
   - Mac 版改完後，這些都可以拿掉或改成新規格，讓兩邊的測試再對齊。
+
+---
+
+## 完成紀錄（Mac 版，2026-11-26）
+
+兩項都已在 Mac 版 0.3.1 完成。和上面規格不同的地方：
+
+- **全形標點的修飾鍵用 ⌥（Option），不是 ⌃**：使用者指定，避開終端機裡 ⌃[ 等於 Esc，以及 App 常用的 ⌃ 快捷鍵。
+  - 引擎的按鍵事件是 `KeyEvent.option(Character)`，對應表是 `Punctuation.option`。其餘的表、候選分組、`alternatives` 的找法都照本文件。
+  - 外殼只在「只按著 ⌥（沒有 Shift、⌘、⌃）＋這六個鍵」時交給引擎，其他 ⌥ 組合鍵（例如 ⌥← 跳一個字）照舊交還給 App。
+  - 代價：棒棒注音啟用時，⌥＋這六個鍵原本的特殊符號（≤ ≥ … æ “ ‘）打不出來。
+- **Caps Lock 鎖定大寫時按 ⌥＋標點**：使用者選了「直接送出全形標點」（`insertText`，不進組字區、沒有候選）。
+
+驗證：
+
+- 單元測試：改了 4 個照舊按法寫的測試；照抄 Windows 版新增 5 個（`WindowsPunctuationTests` 4 項、`BackspaceTests` 1 項）。共 42 個，全部通過；三組正確率不變（99.4%／82.8%／82.1%）。
+- 用 `bangbang-tool keys` 搭配真模型，逐一確認上面兩張表的每個按鍵、候選順序，以及 ㄏㄨ＋ㄈ 的 Backspace。`keys` 新增 `<opt:,>`（⌥＋鍵）、`<shift:,>`（Shift＋鍵）的寫法。
+- 設計文件 3.2、3.5、3.6、3.8 節與第 6 節的決策紀錄、README 都已更新。
+
+**Windows 版之後可以整理**（下次在 Windows 上處理）：
+
+- Mac 版的標點現在和 Windows 配置相同，只差修飾鍵（Mac ⌥、Windows Ctrl）。`Punctuation::Style::Mac` 可以拿掉，引擎預設改用新規格。
+- `windows/tests/EngineTests.cpp` 裡從 Mac 移植的測試還是舊預期，可以照 Mac 版這次的修改對齊。Mac 版改的 4 個測試：`testComposerReplacesSlotAndBackspaces`、`testFullWidthPunctuationEntersComposition`、`testSymbolCandidates`、`testSymbolCandidatesInsideSentence`。

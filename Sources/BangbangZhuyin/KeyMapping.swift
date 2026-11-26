@@ -38,7 +38,13 @@ enum KeyMapping {
         default: break
         }
         if let c = numpad[code] { return .numpad(c) }
-        if let c = characters[code] { return .character(c, shift: event.modifierFlags.contains(.shift)) }
+        if let c = characters[code] {
+            let flags = event.modifierFlags
+            // 按著 ⌥（沒有 Shift）時交給引擎判斷是不是 ⌥＋標點；用 keyCode 判斷實體按鍵，
+            // 不看 event.characters（按著 ⌥ 時那是 ≤ ≥ … 之類的特殊字元）。
+            if flags.contains(.option) { return flags.contains(.shift) ? nil : .option(c) }
+            return .character(c, shift: flags.contains(.shift))
+        }
         return nil
     }
 }

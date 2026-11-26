@@ -3,6 +3,8 @@ import Foundation
 /// 與鍵盤配置無關的按鍵事件。字元一律是美式鍵盤上「沒按 Shift」時的字元（字母為小寫）。
 public enum KeyEvent: Equatable {
     case character(Character, shift: Bool)
+    /// 按著 Option（⌥，沒有其他修飾鍵）的按鍵：⌥＋標點打全形標點，見 Punctuation.option。
+    case option(Character)
     case numpad(Character)
     case space
     case enter
@@ -97,6 +99,10 @@ public final class InputSession {
         switch key {
         case .character(let c, let shift):
             return handleCharacter(c, shift: shift)
+        case .option(let c):
+            // ⌥＋標點：全形標點，和其他全形標點一樣進組字區，按 ↓ 可以換。
+            if let p = Punctuation.option[c] { return insertLiteral(p) }
+            return .passThrough
         case .numpad(let c):
             return insertLiteral(String(c))
         case .space:
@@ -275,23 +281,31 @@ public enum Brackets {
     }
 }
 
-/// 標點符號（仿微軟新注音／小麥注音的標準大千配置）。
+/// 標點符號，比照 Windows 11 的微軟注音（2026-11-26 起，和 Windows 版相同，只是 Windows 的 Ctrl 換成 ⌥）：
+/// Shift＋標點與 ' [ ] 是半形；全形標點用 ⌥＋, . ; ' [ ]。
 public enum Punctuation {
     public static let unshifted: [Character: String] = [
-        "'": "、", "[": "「", "]": "」", "`": "`", "=": "=", "\\": "\\",
+        "'": "'", "[": "[", "]": "]", "`": "`", "=": "=", "\\": "\\",
     ]
 
+    /// 和美式鍵盤按 Shift 打出的半形符號相同；只有 Shift＋[ ] 仍是全形的『』。
     public static let shifted: [Character: String] = [
-        ",": "，", ".": "。", "/": "？", ";": "：", "'": "；",
-        "1": "！", "2": "@", "3": "#", "4": "$", "5": "%", "6": "^", "7": "&", "8": "*",
-        "9": "（", "0": "）", "-": "_", "=": "+",
-        "[": "『", "]": "』", "\\": "|", "`": "～",
+        ",": "<", ".": ">", "/": "?", ";": ":", "'": "\"",
+        "1": "!", "2": "@", "3": "#", "4": "$", "5": "%", "6": "^", "7": "&", "8": "*",
+        "9": "(", "0": ")", "-": "_", "=": "+",
+        "[": "『", "]": "』", "\\": "|", "`": "~",
+    ]
+
+    /// ⌥＋標點：全形標點。
+    public static let option: [Character: String] = [
+        ",": "，", ".": "。", ";": "；", "'": "、", "[": "【", "]": "】",
     ]
 
     /// 符號候選：同一組裡是該符號的全形／半形，以及同一個鍵上的另一個符號（含全形／半形）。
     /// 例如「：」的鍵上還有「；」，所以候選是 ：:；;。每個符號都必須是單一字元。
+    /// 「，」的第二個候選是「、」；「【」之後是「「」「『」，「】」同理（使用者指定）。
     static let groups: [[String]] = [
-        ["，", ",", "＜", "<", "〈", "《"],
+        ["，", "、", ",", "＜", "<", "〈", "《"],
         ["。", ".", "．", "＞", ">", "〉", "》"],
         ["？", "?", "／", "/"],
         ["：", ":", "；", ";"],
@@ -308,16 +322,19 @@ public enum Punctuation {
         ["）", ")", "０", "0"],
         ["_", "＿", "-", "－", "—"],
         ["+", "＋", "=", "＝"],
-        ["「", "『", "[", "{", "［", "｛", "【", "〔"],
-        ["」", "』", "]", "}", "］", "｝", "】", "〕"],
+        ["【", "「", "『", "[", "{", "［", "｛", "〔"],
+        ["】", "」", "』", "]", "}", "］", "｝", "〕"],
         ["～", "~", "`", "‵"],
         ["\\", "＼", "|", "｜"],
         [" ", "\u{3000}"],
     ]
 
-    /// 某個符號的候選清單：自己排第一，其餘照組內順序。不在任何一組時回傳空陣列。
+    /// 某個符號的候選清單：自己排第一，其餘照組內順序。優先用「以它開頭」的那一組
+    /// （例如「、」也出現在「，」那一組，但它有自己的一組），沒有的話用第一個含有它的組。
+    /// 不在任何一組時回傳空陣列。
     public static func alternatives(for symbol: String) -> [String] {
-        guard let group = groups.first(where: { $0.contains(symbol) }) else { return [] }
+        guard let group = groups.first(where: { $0.first == symbol }) ?? groups.first(where: { $0.contains(symbol) })
+        else { return [] }
         return [symbol] + group.filter { $0 != symbol }
     }
 }

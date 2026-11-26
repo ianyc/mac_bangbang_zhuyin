@@ -112,8 +112,6 @@ public enum DaChenLayout {
 /// 正在拼的注音（還沒按聲調鍵的那一個字）。
 public struct BopomofoComposer: Equatable {
     public private(set) var syllable = Syllable()
-    /// 依輸入順序記錄哪些位置有值，倒退鍵時從最後輸入的開始刪。
-    private var order: [Int] = []
 
     public init() {}
 
@@ -124,29 +122,28 @@ public struct BopomofoComposer: Equatable {
 
     /// 放入一個聲母、介音或韻母；同一位置再按一次會取代。
     public mutating func receive(_ component: BopomofoComponent) {
-        let slot: Int
         switch component {
-        case .consonant(let v): syllable.consonant = v; slot = 0
-        case .medial(let v): syllable.medial = v; slot = 1
-        case .rime(let v): syllable.rime = v; slot = 2
+        case .consonant(let v): syllable.consonant = v
+        case .medial(let v): syllable.medial = v
+        case .rime(let v): syllable.rime = v
         case .tone: return
         }
-        order.removeAll { $0 == slot }
-        order.append(slot)
     }
 
+    /// 刪掉最靠近游標（顯示在最後面）的符號：韻母 → 介音 → 聲母，不管輸入的先後。
+    /// 例如先打 ㄏㄨ 再打 ㄈ（取代成 ㄈㄨ），刪的是 ㄨ。比照 Windows 版（2026-11-23 使用者要求）。
     public mutating func backspace() {
-        guard let slot = order.popLast() else { return }
-        switch slot {
-        case 0: syllable.consonant = 0
-        case 1: syllable.medial = 0
-        default: syllable.rime = 0
+        if syllable.rime != 0 {
+            syllable.rime = 0
+        } else if syllable.medial != 0 {
+            syllable.medial = 0
+        } else {
+            syllable.consonant = 0
         }
     }
 
     public mutating func clear() {
         syllable = Syllable()
-        order = []
     }
 
     /// 加上聲調，得到完整音節。

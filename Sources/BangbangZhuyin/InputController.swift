@@ -75,14 +75,23 @@ final class BangbangInputController: IMKInputController {
               let client = sender as? (IMKTextInput & NSObjectProtocol) else { return false }
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        // Command / Control / Option 組合鍵交給 App。
-        if !flags.intersection([.command, .control, .option]).isEmpty { return false }
-        // Caps Lock 鎖定大寫時直接輸出英文。
+        // Command / Control 組合鍵交給 App。
+        if !flags.intersection([.command, .control]).isEmpty { return false }
+        let mapped = KeyMapping.keyEvent(from: event)
+        // Option 只接「⌥＋標點」打全形標點；其他 Option 組合鍵（例如 ⌥← 跳一個字）交給 App。
+        var fullWidth: String?
+        if flags.contains(.option) {
+            guard case .option(let c)? = mapped, let p = Punctuation.option[c] else { return false }
+            fullWidth = p
+        }
+        // Caps Lock 鎖定大寫時直接輸出英文；⌥＋標點直接送出全形標點（不進組字區、沒有候選）。
         if flags.contains(.capsLock) {
             if session.isComposing { commitAll(client) }
-            return false
+            guard let fullWidth else { return false }
+            client.insertText(fullWidth, replacementRange: NSRange(location: NSNotFound, length: 0))
+            return true
         }
-        guard let key = KeyMapping.keyEvent(from: event) else {
+        guard let key = mapped else {
             return session.isComposing
         }
 

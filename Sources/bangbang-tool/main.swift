@@ -120,7 +120,7 @@ case "score":
 case "keys":
     // 模擬按鍵，例如：keys --lm x.lm "5j/ jp6<down>2<enter>"
     // 特殊鍵：<space> <enter> <esc> <bs> <del> <left> <right> <up> <down> <home> <end>，大寫字母代表 Shift+字母
-    // <pick:字> 在候選窗裡選指定的字（自動換頁）
+    // <pick:字> 在候選窗裡選指定的字（自動換頁）；<opt:,> 是 ⌥＋鍵、<shift:,> 是 Shift＋鍵（鍵寫沒按 Shift 時的字元）
     let memoryPath = option("--memory")  // 指定記憶檔（會寫入，請用副本）
     let lm = loadModel()
     let session = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: memoryPath.map { URL(fileURLWithPath: $0) }))
@@ -142,7 +142,13 @@ case "keys":
     while !chars.isEmpty {
         let key: KeyEvent
         var label = String(chars[0])
-        if chars[0] == "<", let close = chars.firstIndex(of: ">"), String(chars[1..<close]).hasPrefix("pick:") {
+        if chars[0] == "<", let close = chars.firstIndex(of: ">"), close == 6 || close == 8,
+           let prefix = ["opt:", "shift:"].first(where: { String(chars[1..<close]).hasPrefix($0) }) {
+            let c = chars[close - 1]
+            key = prefix == "opt:" ? .option(c) : .character(c, shift: true)
+            label = String(chars[0...close])
+            chars.removeFirst(close + 1)
+        } else if chars[0] == "<", let close = chars.firstIndex(of: ">"), String(chars[1..<close]).hasPrefix("pick:") {
             let target = String(chars[6..<close])
             label = String(chars[0...close])
             chars.removeFirst(close + 1)

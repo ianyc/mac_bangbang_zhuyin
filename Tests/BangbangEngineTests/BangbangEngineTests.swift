@@ -62,8 +62,10 @@ final class BopomofoTests: XCTestCase {
         composer.receive(.rime(1))       // ㄚ
         composer.receive(.consonant(3))  // ㄇ 取代 ㄅ
         XCTAssertEqual(composer.display, "ㄇㄚ")
-        composer.backspace()             // 刪掉最後輸入的 ㄇ
-        XCTAssertEqual(composer.display, "ㄚ")
+        composer.backspace()             // 刪掉最靠近游標的 ㄚ（不是最後輸入的 ㄇ）
+        XCTAssertEqual(composer.display, "ㄇ")
+        composer.backspace()
+        XCTAssertTrue(composer.isEmpty)
     }
 }
 
@@ -114,32 +116,102 @@ final class InputSessionTests: XCTestCase {
     /// 全形標點不論何時都進入組字區，按 Enter 才送出（同微軟新注音）。
     func testFullWidthPunctuationEntersComposition() {
         let session = InputSession(lm: makeLM())
-        let out = session.handle(.character(",", shift: true))
+        let out = session.handle(.option(","))
         XCTAssertTrue(out.handled)
         XCTAssertEqual(out.commit, "")
         XCTAssertEqual(session.markedText, "，")
-        session.handle(.character(".", shift: true))
-        session.handle(.character("'", shift: false))
-        session.handle(.character("[", shift: false))
-        XCTAssertEqual(session.handle(.enter).commit, "，。、「")
+        session.handle(.option("."))
+        session.handle(.option("'"))
+        session.handle(.option("["))
+        XCTAssertEqual(session.handle(.enter).commit, "，。、【")
+        XCTAssertFalse(session.isComposing)
+    }
+
+    /// Shift＋標點與 ' [ ] 是半形，沒有組字時直接送出（比照微軟注音）。
+    func testShiftedAndBracketKeysAreHalfWidth() {
+        let cases: [(KeyEvent, String)] = [
+            (.character(",", shift: true), "<"), (.character(".", shift: true), ">"), (.character("1", shift: true), "!"),
+            (.character("`", shift: false), "`"), (.character("`", shift: true), "~"),
+            (.character("9", shift: true), "("), (.character("0", shift: true), ")"),
+            (.character("[", shift: false), "["), (.character("]", shift: false), "]"),
+            (.character(";", shift: true), ":"), (.character("'", shift: false), "'"),
+            (.character("'", shift: true), "\""), (.character("/", shift: true), "?"),
+        ]
+        for (key, text) in cases {
+            let session = InputSession(lm: makeLM())
+            let out = session.handle(key)
+            XCTAssertTrue(out.handled, text)
+            XCTAssertEqual(out.commit, text, "沒有組字時直接送出")
+            XCTAssertFalse(session.isComposing, text)
+        }
+    }
+
+    /// ⌥＋, . ; ' [ ] 打全形標點；其他 ⌥ 組合鍵交給 App。
+    func testOptionKeysTypeFullWidth() {
+        let session = InputSession(lm: makeLM())
+        for c in ",.;'[]" { XCTAssertTrue(session.handle(.option(c)).handled, String(c)) }
+        XCTAssertEqual(session.markedText, "，。；、【】")
+        XCTAssertEqual(session.handle(.enter).commit, "，。；、【】")
+        XCTAssertFalse(session.handle(.option("c")).handled)
+    }
+
+    /// 候選順序：「，」的第二個是「、」；「【」之後是「「」「『」，「】」同理。
+    func testOptionPunctuationCandidates() {
+        func candidates(_ c: Character) -> [String] {
+            let session = InputSession(lm: makeLM())
+            session.handle(.option(c))
+            XCTAssertTrue(session.handle(.down).handled)
+            return session.candidateList?.items.map(\.text) ?? []
+        }
+        XCTAssertEqual(Array(candidates(",").prefix(3)), ["，", "、", ","])
+        XCTAssertEqual(Array(candidates("[").prefix(3)), ["【", "「", "『"])
+        XCTAssertEqual(Array(candidates("]").prefix(3)), ["】", "」", "』"])
+        XCTAssertEqual(candidates(".").first, "。")
+        XCTAssertEqual(candidates(";").first, "；")
+        XCTAssertEqual(candidates("'").first, "、")
+    }
+
+    /// 組字中打半形符號：和 Shift＋字母一樣放進組字區，跟著句子一起送出。
+    func testHalfWidthInsideComposition() {
+        let session = InputSession(lm: makeLM())
+        type(session, "su3")
+        session.handle(.character(",", shift: true))
+        type(session, "cl3")
+        XCTAssertEqual(session.markedText, "你<好")
+        XCTAssertEqual(session.handle(.enter).commit, "你<好")
+    }
+
+    /// 拼注音時 Backspace 刪最靠近游標的符號：先打 ㄏㄨ 再打 ㄈ（取代成 ㄈㄨ），刪的是 ㄨ。
+    func testBackspaceDeletesComponentNearestTheCursor() {
+        let session = InputSession(lm: makeLM())
+        type(session, "cjz")
+        XCTAssertEqual(session.markedText, "ㄈㄨ")
+        session.handle(.backspace)
+        XCTAssertEqual(session.markedText, "ㄈ")
+        type(session, "u,")  // ㄧ ㄝ
+        XCTAssertEqual(session.markedText, "ㄈㄧㄝ")
+        session.handle(.backspace)
+        XCTAssertEqual(session.markedText, "ㄈㄧ")
+        session.handle(.backspace)
+        session.handle(.backspace)
         XCTAssertFalse(session.isComposing)
     }
 
     /// 符號按 ↓：列出全形／半形與同一個鍵上的另一個符號，例如「：」也能換成「；」。
     func testSymbolCandidates() {
         let session = InputSession(lm: makeLM())
-        session.handle(.character(";", shift: true))
+        session.handle(.option(";"))
         XCTAssertTrue(session.handle(.down).handled)
-        XCTAssertEqual(session.candidateList!.items.map(\.text), ["：", ":", "；", ";"])
-        session.handle(.character("3", shift: false))
-        XCTAssertEqual(session.markedText, "；")
-        XCTAssertEqual(session.handle(.enter).commit, "；")
+        XCTAssertEqual(session.candidateList!.items.map(\.text), ["；", "：", ":", ";"])
+        session.handle(.character("2", shift: false))
+        XCTAssertEqual(session.markedText, "：")
+        XCTAssertEqual(session.handle(.enter).commit, "：")
     }
 
     func testSymbolCandidatesInsideSentence() {
         let session = InputSession(lm: makeLM())
         type(session, "su3")
-        session.handle(.character(",", shift: true))
+        session.handle(.option(","))
         type(session, "cl3")
         XCTAssertEqual(session.markedText, "你，好")
         session.handle(.left)
@@ -147,8 +219,8 @@ final class InputSessionTests: XCTestCase {
         session.handle(.down)
         let items = session.candidateList!.items
         XCTAssertEqual(items.first?.text, "，")
-        XCTAssertTrue(items.contains { $0.text == "," })
-        session.handle(.character("2", shift: false))
+        let comma = items.firstIndex { $0.text == "," }!
+        session.handle(.character(Character(String(comma + 1)), shift: false))
         XCTAssertEqual(session.markedText, "你,好")
         XCTAssertEqual(session.composition.cursor, 2, "選完游標移到符號後面")
     }
