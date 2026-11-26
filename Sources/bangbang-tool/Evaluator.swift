@@ -88,6 +88,8 @@ final class Evaluator {
         var chars = 0
         var correctChars = 0
         var failures: [(expected: String, got: String, reading: String)] = []
+        /// 整句選字花的時間（不含中文轉注音與比對）。
+        var decodeSeconds = 0.0
 
         var charAccuracy: Double { chars == 0 ? 0 : Double(correctChars) / Double(chars) }
         var sentenceAccuracy: Double { sentences == 0 ? 0 : Double(exact) / Double(sentences) }
@@ -113,7 +115,9 @@ final class Evaluator {
                 info("無法轉成注音：\(expected)")
                 continue
             }
+            let decodeStart = Date()
             let got = convert(syllables)
+            result.decodeSeconds += Date().timeIntervalSince(decodeStart)
             result.sentences += 1
             result.chars += expected.count
             let same = zip(expected, got).filter { Evaluator.equivalent($0, $1) }.count

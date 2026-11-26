@@ -5,11 +5,21 @@ import Foundation
 let usage = """
 用法：
   bangbang-tool build-lm --data <小麥資料夾> --weights <讀音比例檔> [--discouraged <少用字檔>] --out <模型檔> [--heldout <檔案>] [--min-bigram N] [語料檔...]
-  bangbang-tool convert --lm <模型檔> <注音，音節以空白分隔>
-  bangbang-tool reading --lm <模型檔> <中文>
-  bangbang-tool eval --lm <模型檔> <測試句檔> [--limit N] [--show N]
+  bangbang-tool convert [--lm <模型檔>] <注音，音節以空白分隔>
+  bangbang-tool lookup  [--lm <模型檔>] <注音>
+  bangbang-tool score   [--lm <模型檔>] <詞> <詞> ...
+  bangbang-tool reading [--lm <模型檔>] <中文> ...
+  bangbang-tool eval    [--lm <模型檔>] <測試句檔> [--limit N] [--show N] [--timing]
+  bangbang-tool keys    [--lm <模型檔>] [--memory <記憶檔>] "<按鍵>"
+  bangbang-tool tis     列出系統輸入方式裡的棒棒注音（是否註冊、啟用、選用）
   bangbang-tool register <輸入法 .app 路徑>
+沒有指定 --lm 時，使用 repo 的 build/bangbang-v3.lm。
 """
+
+/// 沒有指定 --lm 時用的模型檔：從這個原始檔的位置推算 repo 根目錄（同 Windows 版編譯時寫入的路徑）。
+let defaultModelPath = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    .appendingPathComponent("build/bangbang-v3.lm").path
 
 var args = Array(CommandLine.arguments.dropFirst())
 guard let command = args.first else {
@@ -26,10 +36,7 @@ func option(_ name: String) -> String? {
 }
 
 func loadModel() -> LanguageModel {
-    guard let path = option("--lm") else {
-        print(usage)
-        exit(1)
-    }
+    let path = option("--lm") ?? defaultModelPath
     do {
         return try LanguageModel.load(from: URL(fileURLWithPath: path))
     } catch {
@@ -184,6 +191,8 @@ case "reading":
 case "eval":
     let limit = option("--limit").flatMap(Int.init) ?? .max
     let show = option("--show").flatMap(Int.init) ?? 30
+    let timing = args.contains("--timing")
+    args.removeAll { $0 == "--timing" }
     let lm = loadModel()
     guard let path = args.first else {
         print(usage)
@@ -198,6 +207,30 @@ case "eval":
     }
     print(String(format: "句子 %d 句，整句全對 %.1f%%，逐字正確率 %.2f%%（%.1f 秒）",
                  r.sentences, r.sentenceAccuracy * 100, r.charAccuracy * 100, Date().timeIntervalSince(start)))
+    if timing, r.sentences > 0 {
+        print(String(format: "其中整句選字 %.2f 秒（每句 %.3f 毫秒），其餘是中文轉注音與比對",
+                     r.decodeSeconds, r.decodeSeconds * 1000 / Double(r.sentences)))
+    }
+
+case "tis":
+    // 系統輸入方式裡的棒棒注音（含改名前的 BunbunZhuyin），以及目前選用的輸入法。只讀不改。
+    func property(_ source: TISInputSource, _ key: CFString) -> Any? {
+        guard let p = TISGetInputSourceProperty(source, key) else { return nil }
+        return Unmanaged<AnyObject>.fromOpaque(p).takeUnretainedValue()
+    }
+    let sources = TISCreateInputSourceList(nil, true)?.takeRetainedValue() as? [TISInputSource] ?? []
+    var found = false
+    for source in sources {
+        guard let id = property(source, kTISPropertyInputSourceID) as? String,
+              id.hasPrefix("com.ychsiao.inputmethod.") else { continue }
+        found = true
+        let enabled = (property(source, kTISPropertyInputSourceIsEnabled) as? Bool) == true
+        let selected = (property(source, kTISPropertyInputSourceIsSelected) as? Bool) == true
+        print("\(id)\t名稱：\(property(source, kTISPropertyLocalizedName) as? String ?? "-")\t已啟用：\(enabled ? "是" : "否")\t使用中：\(selected ? "是" : "否")")
+    }
+    if !found { print("系統輸入方式裡沒有棒棒注音") }
+    let current = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+    print("目前的輸入法：\(property(current, kTISPropertyLocalizedName) as? String ?? "-")（\(property(current, kTISPropertyInputSourceID) as? String ?? "-")）")
 
 case "register":
     guard let path = args.first else {

@@ -8,6 +8,10 @@ import Foundation
 ///   之後改選「你」一次就平手，最近選的是「你」，所以變回「你」。
 /// - 單詞記憶：只看讀音的一格，勝出者在任何位置都小幅加分。
 /// 每個字詞最多累計 maxCount 次，舊習慣不會累積到改不掉。
+///
+/// 記憶檔（比照 Windows 版）：
+/// - 被別人換掉（例如從另一台電腦複製過來）時，下次開始組字前重新載入；被刪掉就跟著忘掉（見 refresh）。
+/// - 讀到壞掉的記憶檔時保留目前的記憶，下次存檔前把壞檔改名成 `.corrupt` 保留，不直接蓋掉。
 public final class UserModel: ScoreAdjuster {
     struct Record: Codable {
         var count: Int
@@ -32,6 +36,23 @@ public final class UserModel: ScoreAdjuster {
         var lastUsed: Double
     }
 
+    /// 檔案的版本：檔案編號、大小、修改時間。存檔是寫新檔再取代原檔，所以每次存檔的檔案編號都不同。
+    struct FileStamp: Equatable {
+        let inode: UInt64
+        let size: Int64
+        let seconds: Int
+        let nanoseconds: Int
+
+        init?(_ url: URL) {
+            var info = stat()
+            guard stat(url.path, &info) == 0 else { return nil }
+            inode = UInt64(info.st_ino)
+            size = Int64(info.st_size)
+            seconds = Int(info.st_mtimespec.tv_sec)
+            nanoseconds = Int(info.st_mtimespec.tv_nsec)
+        }
+    }
+
     public static let maxCount = 3
     /// 上下文勝出者比語言模型的首選再多出的分數，確保它一定被選中。
     public static let contextualMargin: Float = 4
@@ -45,11 +66,18 @@ public final class UserModel: ScoreAdjuster {
     private var global: [ReadingKey: [UInt32: Pick]] = [:]
     private var contextualBonusCache: [ContextSlot: Float] = [:]
     private let saveQueue = DispatchQueue(label: "bangbang.usermodel.save")
+    /// 目前磁碟上的記憶檔是壞的：下次存檔前先改名成 .corrupt 保留。
+    private var loadedCorrupt = false
+    /// 上次讀進來或自己寫出去的記憶檔版本，和磁碟上的不同就是被別人換掉了。
+    /// 存檔在背景佇列執行，所以這兩個欄位用 stateLock 保護。
+    private var loadedStamp: FileStamp?
+    private var savesInFlight = 0
+    private let stateLock = NSLock()
 
     public init(lm: LanguageModel, fileURL: URL?) {
         self.lm = lm
         self.fileURL = fileURL
-        load()
+        reload()
     }
 
     public func bonus(prev: UInt32, word: UInt32, key: ReadingKey) -> Float {
@@ -67,6 +95,8 @@ public final class UserModel: ScoreAdjuster {
     }
 
     public func learn(prev: UInt32, word: UInt32, key: ReadingKey, at time: Double = Date().timeIntervalSince1970) {
+        // 記憶檔被換掉或刪掉的話，先以檔案為準，再加上這次的選字。
+        refresh()
         let slot = ContextSlot(prev: prev, key: key)
         let contextPick = UserModel.add(word, to: &contextual[slot, default: [:]], at: time)
         let globalPick = UserModel.add(word, to: &global[key, default: [:]], at: time)
@@ -81,11 +111,28 @@ public final class UserModel: ScoreAdjuster {
     }
 
     public func reset() {
-        stored = Stored()
-        contextual = [:]
-        global = [:]
-        contextualBonusCache = [:]
+        clearMemory()
         save()
+    }
+
+    /// 記憶檔被別人換掉（例如從另一台電腦複製過來）或刪掉時，重新載入；刪掉就跟著忘掉。
+    /// 開始組字前呼叫。檔案沒變時只是一次 stat，很便宜。回傳有沒有重新載入。
+    @discardableResult
+    public func refresh() -> Bool {
+        guard let fileURL else { return false }
+        stateLock.lock()
+        let busy = savesInFlight > 0
+        let known = loadedStamp
+        stateLock.unlock()
+        // 自己的存檔還在寫：寫完會記下新的版本，這時不用檢查。
+        if busy || FileStamp(fileURL) == known { return false }
+        reload()
+        return true
+    }
+
+    /// 等背景的存檔寫完（測試與工具用）。
+    public func waitUntilSaved() {
+        saveQueue.sync {}
     }
 
     /// 一格裡選最多次的勝出；次數一樣時，最近選的勝出。
@@ -120,9 +167,44 @@ public final class UserModel: ScoreAdjuster {
         return value
     }
 
-    private func load() {
-        guard let fileURL, let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode(Stored.self, from: data) else { return }
+    private func clearMemory() {
+        stored = Stored()
+        contextual = [:]
+        global = [:]
+        contextualBonusCache = [:]
+    }
+
+    private func setLoadedStamp(_ stamp: FileStamp?) {
+        stateLock.lock()
+        loadedStamp = stamp
+        stateLock.unlock()
+    }
+
+    /// 讀記憶檔。檔案不見了就清空記憶；壞掉就保留目前的記憶（見 loadedCorrupt）。
+    private func reload() {
+        guard let fileURL else { return }
+        guard let stamp = FileStamp(fileURL) else {
+            // 被刪掉了（例如使用者想清除記憶）：跟著忘掉。
+            clearMemory()
+            loadedCorrupt = false
+            setLoadedStamp(nil)
+            return
+        }
+        // 讀不到（例如權限）時什麼都不改，下次再試。
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        guard let decoded = try? JSONDecoder().decode(Stored.self, from: data) else {
+            // 壞檔也記下版本：檔案沒再變之前不用每次重讀。
+            loadedCorrupt = true
+            setLoadedStamp(stamp)
+            return
+        }
+        loadedCorrupt = false
+        load(decoded)
+        setLoadedStamp(stamp)
+    }
+
+    private func load(_ decoded: Stored) {
+        clearMemory()
         var converted = Stored(version: 2)
         // 文字 → 編號的索引只在載入時用，用完就釋放。
         var wordIndex: [String: UInt32] = [:]
@@ -156,12 +238,31 @@ public final class UserModel: ScoreAdjuster {
     private func save() {
         guard let fileURL else { return }
         let snapshot = stored
-        saveQueue.async {
+        let keepCorruptFile = loadedCorrupt
+        loadedCorrupt = false
+        stateLock.lock()
+        savesInFlight += 1
+        stateLock.unlock()
+        saveQueue.async { [self] in
+            let fm = FileManager.default
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? data.write(to: fileURL, options: .atomic)
+            if let data = try? encoder.encode(snapshot) {
+                try? fm.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if keepCorruptFile {
+                    // 壞掉的記憶檔（例如手動改到一半）改名保留，不直接蓋掉。
+                    let aside = fileURL.appendingPathExtension("corrupt")
+                    try? fm.removeItem(at: aside)
+                    try? fm.moveItem(at: fileURL, to: aside)
+                }
+                // .atomic 是寫暫存檔再取代原檔：讀的人一定讀到完整的某一版。
+                try? data.write(to: fileURL, options: .atomic)
+            }
+            let written = FileStamp(fileURL)
+            stateLock.lock()
+            loadedStamp = written
+            savesInFlight -= 1
+            stateLock.unlock()
         }
     }
 }

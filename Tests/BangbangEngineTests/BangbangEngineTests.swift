@@ -382,6 +382,17 @@ final class InputSessionTests: XCTestCase {
         XCTAssertEqual(session.markedText, "你好")
     }
 
+    /// 組字區上限 30 格（比照 Windows 版）：打到第 31 格才自動送出最前面的詞。
+    func testCompositionHoldsThirtyCells() {
+        let session = InputSession(lm: makeLM())
+        XCTAssertEqual(session.maxCompositionLength, 30)
+        let outputs = type(session, String(repeating: "su3", count: 30))
+        XCTAssertEqual(outputs.map(\.commit).joined(), "", "30 格以內都留在組字區")
+        XCTAssertEqual(session.composition.count, 30)
+        XCTAssertEqual(type(session, "su3").map(\.commit).joined(), "你", "第 31 格送出最前面的詞")
+        XCTAssertEqual(session.composition.count, 30)
+    }
+
     func testUserChoiceIsRemembered() {
         let lm = makeLM()
         let memory = UserModel(lm: lm, fileURL: nil)
@@ -467,6 +478,94 @@ final class UserModelTests: XCTestCase {
         pick(session, "妳")  // 句首選「妳」
         type(session, "cl3su3")  // 「好」後面的 ㄋㄧˇ
         XCTAssertEqual(session.markedText, "好你")
+    }
+
+    // MARK: - 記憶檔（比照 Windows 版）
+
+    /// 每個測試用自己的暫存資料夾。
+    private func temporaryMemoryFile() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bangbang-memory-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir.appendingPathComponent("user-model.json")
+    }
+
+    /// 另一台電腦的記憶檔：句首選過「妳」。
+    private let otherMacMemory = #"{"version":2,"contextual":{"<s>\t妳\tㄋㄧˇ":{"count":1,"lastUsed":1}},"unigram":{"妳\tㄋㄧˇ":{"count":1,"lastUsed":1}}}"#
+
+    /// 記憶檔被換掉（例如從另一台電腦複製過來）時，下次組字前重新載入，不用重新啟動輸入法。
+    func testReloadsWhenFileIsReplaced() throws {
+        let lm = makeLM()
+        let url = try temporaryMemoryFile()
+        let session = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: url))
+        XCTAssertEqual(defaultChoice(session), "你")
+        try otherMacMemory.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(defaultChoice(session), "妳", "下次組字前重新載入")
+    }
+
+    /// 刪掉記憶檔就是清除記憶：執行中的輸入法也跟著忘掉。
+    func testDeletingFileForgetsMemory() throws {
+        let lm = makeLM()
+        let url = try temporaryMemoryFile()
+        let memory = UserModel(lm: lm, fileURL: url)
+        let session = InputSession(lm: lm, userModel: memory)
+        pick(session, "妳")
+        memory.waitUntilSaved()
+        XCTAssertEqual(defaultChoice(session), "妳")
+        try FileManager.default.removeItem(at: url)
+        XCTAssertEqual(defaultChoice(session), "你", "刪掉記憶檔就跟著忘掉")
+        pick(session, "妳")
+        memory.waitUntilSaved()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "之後學到的照常存檔")
+    }
+
+    /// 自己寫出去的記憶檔不算「被別人換掉」：不會重讀，存檔還沒寫完時也不會遺失剛學到的。
+    func testOwnSaveIsNotTreatedAsReplacement() throws {
+        let lm = makeLM()
+        let url = try temporaryMemoryFile()
+        let memory = UserModel(lm: lm, fileURL: url)
+        let session = InputSession(lm: lm, userModel: memory)
+        pick(session, "妳")
+        XCTAssertEqual(defaultChoice(session), "妳", "存檔還在背景寫的時候")
+        memory.waitUntilSaved()
+        XCTAssertFalse(memory.refresh(), "寫完之後版本和自己寫的一樣")
+        XCTAssertEqual(defaultChoice(session), "妳")
+        let other = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: url))
+        XCTAssertEqual(defaultChoice(other), "妳", "確實寫進檔案")
+    }
+
+    /// 壞掉的記憶檔（例如手動改到一半）在下次存檔前改名成 .corrupt 保留，不直接蓋掉。
+    func testCorruptFileIsKeptAside() throws {
+        let lm = makeLM()
+        let url = try temporaryMemoryFile()
+        try "{ 壞掉了".write(to: url, atomically: true, encoding: .utf8)
+        let memory = UserModel(lm: lm, fileURL: url)
+        let session = InputSession(lm: lm, userModel: memory)
+        XCTAssertEqual(defaultChoice(session), "你")
+        pick(session, "妳")
+        memory.waitUntilSaved()
+        XCTAssertEqual(try String(contentsOf: url.appendingPathExtension("corrupt"), encoding: .utf8), "{ 壞掉了")
+        let reloaded = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: url))
+        XCTAssertEqual(defaultChoice(reloaded), "妳", "新的記憶檔是完整的")
+    }
+
+    /// 執行中記憶檔被換成壞檔：保留目前的記憶；下次存檔時才把壞檔改名保留。
+    func testCorruptReplacementKeepsCurrentMemory() throws {
+        let lm = makeLM()
+        let url = try temporaryMemoryFile()
+        let memory = UserModel(lm: lm, fileURL: url)
+        let session = InputSession(lm: lm, userModel: memory)
+        pick(session, "妳")
+        memory.waitUntilSaved()
+        try "not json".write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(defaultChoice(session), "妳", "壞檔不會清掉目前的記憶")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.appendingPathExtension("corrupt").path), "還沒存檔前不動它")
+        pick(session, "你")
+        memory.waitUntilSaved()
+        XCTAssertEqual(try String(contentsOf: url.appendingPathExtension("corrupt"), encoding: .utf8), "not json")
+        XCTAssertEqual(defaultChoice(session), "你")
+        let reloaded = InputSession(lm: lm, userModel: UserModel(lm: lm, fileURL: url))
+        XCTAssertEqual(defaultChoice(reloaded), "你", "新檔同時有「妳」和「你」，平手看最近")
     }
 
     /// 舊版記憶檔（上下文記錄沒有讀音）要能照常使用並轉成新格式。

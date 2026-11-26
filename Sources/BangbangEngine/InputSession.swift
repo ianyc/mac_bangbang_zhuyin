@@ -51,7 +51,8 @@ public final class InputSession {
     public private(set) var composer = BopomofoComposer()
     public private(set) var candidateList: CandidateList?
     /// 組字區超過這個長度，就自動送出最前面的詞。
-    public var maxCompositionLength = 20
+    /// 30 格比照 Windows 版（2026-11-26 使用者要求，原本是 20 格）。
+    public var maxCompositionLength = 30
     public var candidatesPerPage = 9
 
     public init(lm: LanguageModel, userModel: UserModel? = nil) {
@@ -92,6 +93,8 @@ public final class InputSession {
     }
 
     public func handle(_ key: KeyEvent) -> SessionOutput {
+        // 開始組字前，確認選字記憶檔沒被換掉（例如從另一台電腦複製過來）或刪掉。
+        if !isComposing { userModel?.refresh() }
         if candidateList != nil {
             if let out = handleCandidateKey(key) { return out }
             candidateList = nil

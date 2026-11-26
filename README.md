@@ -4,7 +4,7 @@
 
 macOS 內建的注音輸入法有幾個讓人不順手的地方：Shift + 字母會打出全形英文、要把游標移到字的後面才能選字、整句選字常常選錯。棒棒注音從選字引擎到輸入法外殼都是自己寫的，選字用的語言模型由大量台灣中文文章統計而來，全程在本機執行、不需要網路。
 
-- 版本：0.3.1
+- 版本：0.3.3
 - 系統需求：macOS 13 以上，Apple 晶片與 Intel 皆可
 - 鍵盤排列：標準大千
 
@@ -24,7 +24,7 @@ macOS 內建的注音輸入法有幾個讓人不順手的地方：Shift + 字母
 - **游標在字前面就能選字**：用 ← → 把游標移到要改的字前面，按 ↓ 叫出從這個字開始的詞與單字。游標在最後時，只列出最後一個字。
 - **目前的選字排第一筆**，其他候選依上下文排序。
 - **改字不影響前面**：手動選字後，前面的字固定不變，後面的字會依新的上下文重新調整。
-- **按 Enter 才送出**：打字、空白、全形標點都會留在組字區，可以隨時回頭修改，按 Enter 才一起送出。
+- **按 Enter 才送出**：打字、空白、全形標點都會留在組字區，可以隨時回頭修改，按 Enter 才一起送出。組字區最多 30 格，超過時最前面的詞會自動送出。
 - **Shift + 字母輸出半形英文**，不會變成全形。
 - **標點比照 Windows 11 微軟注音**：⌥ + , . ; ' [ ] 打出全形「，。；、【】」；Shift＋標點與 ' [ ] 是半形，例如 Shift + , 是「<」。
 - **符號候選字**：在符號上按 ↓，可以換成全形／半形，或同一個鍵上的另一個符號。例如 ⌥+; 打出的「；」可以換成「：」「:」「;」，空白可以換成全形空白。
@@ -37,6 +37,8 @@ macOS 內建的注音輸入法有幾個讓人不順手的地方：Shift + 字母
   - 選錯了不用刪除，改回來就好。例如選了「妳」之後改選「你」一次，下次就是「你」。
   - 以前選很多次的舊習慣，最多改選 3 次就會換過來。
 - 記憶存在本機的 `~/Library/Application Support/BangbangZhuyin/user-model.json`，重新安裝或更新版本都會保留。
+- 這個檔案被換掉（例如從 Windows 版複製過來）時，下次開始打字就會自動重新載入，不用重新啟動輸入法；**刪掉它就是清除記憶**，同樣立刻生效。
+- 記憶檔壞掉時（例如手動改到一半），下次學習前會把它改名成 `user-model.json.corrupt` 保留，不會直接蓋掉。
 
 ### 隱私
 
@@ -136,7 +138,7 @@ scripts/install.sh
 ## 已知限制
 
 - 還沒有「自訂詞」功能，詞庫裡沒有的新詞（例如新的人名、專有名詞）沒辦法整個詞一起打出來。
-- 選字記憶沒有「全部清除」的選項；要整個重來，可以刪除 `~/Library/Application Support/BangbangZhuyin/user-model.json`。
+- 選字記憶沒有「全部清除」的選項；要整個重來，刪除 `~/Library/Application Support/BangbangZhuyin/user-model.json` 即可，下次打字時生效。
 - 還沒有偏好設定畫面，例如候選字大小、每頁數量、橫式或直式候選窗。
 - 候選字視窗在部分 App（例如終端機類、Electron 類）的位置可能不準。
 - 快速連按 Caps Lock 時偶爾切換不過去，這是系統切換輸入方式的限制。
@@ -153,6 +155,7 @@ scripts/install.sh         # 建置並安裝到 ~/Library/Input Methods
 scripts/build.sh           # 只建置 App（UNIVERSAL=1 時編成 Apple 晶片與 Intel 通用版）
 scripts/make-dmg.sh        # 產生 build/BangbangZhuyin-<版本>.dmg
 scripts/build-model.sh     # 重建語言模型，並跑三組正確率評測
+scripts/check-install.sh   # 檢查安裝狀態（只讀不改）：裝在哪、有幾份、版本、是否在執行、選字記憶；加 --logs 另外列出最近的錯誤
 scripts/download-corpus.sh # 下載語料到 corpus/（build-model.sh 會自動呼叫）
 swift test                 # 單元測試：按鍵行為、選字、符號、模型檔
 ```
@@ -162,13 +165,15 @@ swift test                 # 單元測試：按鍵行為、選字、符號、模
 ### 除錯工具 `bangbang-tool`
 
 ```bash
-T=.build/release/bangbang-tool
-$T convert --lm build/bangbang-v3.lm ㄩㄝˋ ㄍㄥ ㄒㄧㄣ ㄩㄝˋ ㄋㄢˊ ㄩㄥˋ   # 注音轉中文
-$T lookup  --lm build/bangbang-v3.lm ㄉㄜ˙                              # 查某讀音的候選字與分數
-$T score   --lm build/bangbang-v3.lm 越 更新 越 難 用                   # 某種斷詞的分數明細
-$T eval    --lm build/bangbang-v3.lm Tests/eval/sentences.txt           # 跑測試句
-$T keys    --lm build/bangbang-v3.lm "5j/ jp6<down><pick:聞><enter>"   # 模擬按鍵（大千鍵位），<pick:字> 選指定候選
-                                                                     # 加 --memory <檔案> 可載入記憶檔（會寫入，請用副本）
+T=.build/release/bangbang-tool          # 沒有指定 --lm 時，用 build/bangbang-v3.lm
+$T convert ㄩㄝˋ ㄍㄥ ㄒㄧㄣ ㄩㄝˋ ㄋㄢˊ ㄩㄥˋ     # 注音轉中文
+$T lookup  ㄉㄜ˙                                # 查某讀音的候選字與分數
+$T score   越 更新 越 難 用                     # 某種斷詞的分數明細
+$T eval    Tests/eval/sentences.txt --timing    # 跑測試句；--timing 顯示整句選字花的時間
+$T keys    "5j/ jp6<down><pick:聞><enter>"     # 模擬按鍵（大千鍵位），<pick:字> 選指定候選，
+                                                # <opt:,> 是 ⌥＋鍵、<shift:,> 是 Shift＋鍵；
+                                                # 加 --memory <檔案> 可載入記憶檔（會寫入，請用副本）
+$T tis                                          # 系統輸入方式裡的棒棒注音：是否註冊、啟用、使用中
 ```
 
 遇到選錯的句子，把它加進 `Tests/eval/sentences.txt`（需要時用「句子 | 注音」指定讀音），改完詞庫或參數後重跑 `scripts/build-model.sh`，確認正確率沒有變差。
@@ -217,6 +222,19 @@ scripts/install.sh
 ---
 
 ## 版本紀錄
+
+### 0.3.3（2026-11-26）
+
+- 組字區上限從 20 格改成 30 格，和 Windows 版一致。
+
+### 0.3.2（2026-11-26）
+
+比照 Windows 版：
+
+- 選字記憶檔被換掉（例如從 Windows 版複製過來）時，下次開始打字自動重新載入；刪掉記憶檔就是清除記憶，不用重新啟動輸入法。
+- 讀到壞掉的記憶檔時保留目前的記憶，下次學習前把壞檔改名成 `.corrupt` 保留。
+- 新增 `scripts/check-install.sh`：檢查安裝狀態，包括裝了幾份、執行中的是不是舊版、記憶檔。
+- `bangbang-tool`：不指定 `--lm` 時用預設模型；`eval --timing` 顯示選字速度；新增 `tis` 指令。
 
 ### 0.3.1（2026-11-26）
 
