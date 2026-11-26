@@ -187,6 +187,7 @@ std::optional<UINT> virtualKeyFor(char c) {
 /// <num0>～<num9>（數字鍵盤）、<S-x>（Shift+x）、<C-x>（Ctrl+x）。
 /// 另外有檢查與操作（不送按鍵）：
 ///   <?cand>   候選窗顯示中、不在游標那一行上、沒有搶走焦點　　<?nocand>  候選窗沒有顯示
+///   <?composing>  文件裡的組字區還在（沒有送出）　　<?committed>  文件裡沒有組字區（已經送出）
 ///   <?list>   候選字的 UI 元件內容（數量、每一個字、反白、頁碼）和引擎相同
 ///   <?uiless> 這一題扮演自己畫候選字的程式（BeginUIElement 回答不要輸入法畫）
 ///   <?ui-select:N>、<?ui-finalize>、<?ui-abort>  透過 ITfCandidateListUIElementBehavior 操作
@@ -578,19 +579,45 @@ void forceChinese(TestRun& run) {
     run.shiftPending = false;
 }
 
+/// 文件裡有沒有進行中的組字（底線那一段）。打出來的字相同，送出了沒有就只能這樣分辨。
+bool documentHasComposition(ITfThreadMgr* threadMgr) {
+    ComPtr<ITfDocumentMgr> document;
+    ComPtr<ITfContext> context;
+    ComPtr<ITfContextComposition> compositions;
+    ComPtr<IEnumITfCompositionView> views;
+    if (FAILED(threadMgr->GetFocus(&document)) || !document || FAILED(document->GetTop(&context)) || !context ||
+        FAILED(context.As(&compositions)) || FAILED(compositions->EnumCompositions(&views)) || !views) {
+        return false;
+    }
+    ComPtr<ITfCompositionView> view;
+    ULONG fetched = 0;
+    return views->Next(1, &view, &fetched) == S_OK && fetched == 1;
+}
+
 /// <?mode:zh|en|en-local>：輸入法開關、轉換模式、全域狀態、工作列圖示都要符合。
+/// 使用者在組字中切到英文時，組字區送出前輸入法對程式回報的還是「開著」（同 TextService::publishInputMode），
+/// 送出後才回報英文；改回報是延後到訊息迴圈的下一輪做的，所以這裡會等一下。
 void checkMode(const std::string& expect, TestRun& run) {
     const bool threadChinese = expect == "zh";
     const bool globalChinese = expect != "en";
     if (run.chinese != threadChinese || run.globalChinese != globalChinese) run.problems += "  （腳本錯誤）標準答案的中英狀態和 <?mode:" + expect + "> 不同\n";
-    const CompartmentValue open = readCompartment(run.threadMgr, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE);
-    const CompartmentValue conversion = readCompartment(run.threadMgr, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION);
-    if (open.type != VT_I4 || (open.value != 0) != threadChinese) {
-        run.problems += "  輸入法開關是 " + std::to_string(open.value) + "（型別 " + std::to_string(open.type) + "），應為 " + (threadChinese ? "1" : "0") + "\n";
+    const bool reportedOpen = threadChinese || run.oracle->isComposing();
+    CompartmentValue open, conversion;
+    for (int i = 0; i < 50; ++i) {
+        open = readCompartment(run.threadMgr, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE);
+        conversion = readCompartment(run.threadMgr, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION);
+        if (open.type == VT_I4 && (open.value != 0) == reportedOpen && conversion.type == VT_I4 &&
+            ((conversion.value & TF_CONVERSIONMODE_NATIVE) != 0) == reportedOpen) {
+            break;
+        }
+        pumpMessages(1);
     }
-    if (conversion.type != VT_I4 || ((conversion.value & TF_CONVERSIONMODE_NATIVE) != 0) != threadChinese) {
+    if (open.type != VT_I4 || (open.value != 0) != reportedOpen) {
+        run.problems += "  輸入法開關是 " + std::to_string(open.value) + "（型別 " + std::to_string(open.type) + "），應為 " + (reportedOpen ? "1" : "0") + "\n";
+    }
+    if (conversion.type != VT_I4 || ((conversion.value & TF_CONVERSIONMODE_NATIVE) != 0) != reportedOpen) {
         run.problems += "  轉換模式是 " + std::to_string(conversion.value) + "（型別 " + std::to_string(conversion.type) + "），應為" +
-                        (threadChinese ? "中文" : "英數") + "\n";
+                        (reportedOpen ? "中文" : "英數") + "\n";
     }
     CompartmentValue global;
     if (const auto compartments = globalCompartments(run.threadMgr)) global = readCompartment(compartments.Get(), kChineseModeCompartment);
@@ -637,6 +664,10 @@ void runStep(const ScriptKey& key, TestRun& run) {
         checkCandidateHidden(run.problems);
     } else if (check == "list") {
         checkCandidateList(run.uiMgr, *run.sink, *run.oracle, run.problems);
+    } else if (check == "composing" || check == "committed") {
+        const bool expected = check == "composing";
+        if (run.oracle->isComposing() != expected) run.problems += "  （腳本錯誤）標準答案的組字狀態和 <?" + check + "> 不同\n";
+        if (documentHasComposition(run.threadMgr) != expected) run.problems += expected ? "  組字區不見了（被送出了）\n" : "  組字區還在（應該已經送出）\n";
     } else if (check == "uiless") {
         run.sink->drawItself = true;
     } else if (check.rfind("mode:", 0) == 0) {
@@ -730,12 +761,13 @@ std::vector<TestCase> testCases() {
         {"UI-less：Abort 關閉候選字", "<?uiless>5j/ jp6<down><?ui-abort><?nocand><enter>"},
         // 中英切換（第 5 階段）
         {"單按 Shift 切到英文，按鍵全部交還", "<?mode:zh><shift><?mode:en>su3<enter><bs><shift><?mode:zh>"},
-        {"組字中單按 Shift：組字區留著，英文接著打在組字區", "su3cl3<shift><?mode:en>ab<shift><?mode:zh>su3<enter>"},
+        {"組字中單按 Shift：組字區留著，英文接著打在組字區", "su3cl3<shift><?mode:en><?composing>ab<?composing><shift><?mode:zh>su3<enter><?committed>"},
+        {"組字中單按 Shift：送出前對程式維持開著，送出後才回報英文", "su3<shift><?mode:en><?composing>a<enter><?committed><?mode:en><shift><?mode:zh>"},
         {"英文模式接著組字區打：空白、數字、符號也放進組字區，Enter 才送出", "su3<shift><?mode:en>a b1<S-1>.<S-[><enter><shift><?mode:zh>"},
         {"英文模式下再單按 Shift 切回中文", "<shift><shift><?mode:zh>su3<enter>"},
         {"Shift＋字母不會切換", "<shift-down>A<shift-up><?mode:zh>su3<enter>"},
         {"按住 Shift 點滑鼠不會切換", "<shift-down><click><shift-up><?mode:zh>su3<enter>"},
-        {"候選窗開著時單按 Shift：關閉候選窗，組字區留著", "5j/ jp6<down><?cand><shift><?nocand><?mode:en><shift><?mode:zh><enter>"},
+        {"候選窗開著時單按 Shift：關閉候選窗，組字區留著", "5j/ jp6<down><?cand><shift><?nocand><?mode:en><?composing><shift><?mode:zh><enter><?committed>"},
         {"程式自己關掉輸入法：只有這個程式變英文", "<?set-open:0><?mode:en-local>su3<?set-open:1><?mode:zh>su3<enter>"},
         {"程式關掉輸入法後單按 Shift：切回中文", "<?set-open:0><shift><?mode:zh>su3<enter>"},
         {"點工作列的「中／英」圖示切換", "<?lbi-click><?mode:en>su3<?lbi-click><?mode:zh>su3<enter>"},

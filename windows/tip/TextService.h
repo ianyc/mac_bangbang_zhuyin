@@ -208,6 +208,10 @@ private:
     bool chinese_ = true;
     /// 正在寫自己的 compartment：忽略它們觸發的通知。
     bool writingCompartments_ = false;
+    /// 上一次寫給程式的輸入法開關（GUID_COMPARTMENT_KEYBOARD_OPENCLOSE），用來分辨程式自己改的。
+    bool publishedOpen_ = true;
+    /// 使用者在組字中切到英文、組字區還留著：對程式先維持回報「開著」，組字區結束後再回報英文。
+    bool openForComposition_ = false;
     ShiftTapDetector shiftTap_;
     HHOOK messageHook_ = nullptr;
     UINT_PTR republishTimer_ = 0;

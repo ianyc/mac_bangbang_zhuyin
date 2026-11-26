@@ -578,14 +578,18 @@ void TextService::publishInputMode() {
     if (!threadMgr_) return;
     // 註冊了 INPUTMODECOMPARTMENT 類別：IMM32 程式看到的開關狀態、轉換模式都讀這兩個值。
     // 沒有模型時按鍵全部交還，算英文。
-    const bool chinese = chinese_ && engine_ != nullptr;
+    // 使用者在組字中切到英文、組字區留著時，送出之前先維持回報「中文」（開著）：舊式 IMM32 程式在輸入法關掉後
+    // 不再把按鍵交給輸入法，接著打的英文就進不了組字區。組字區結束時再回報英文（forgetComposition）。
+    openForComposition_ = !chinese_ && session_ && session_->isComposing();
+    const bool chinese = (chinese_ || openForComposition_) && engine_ != nullptr;
+    publishedOpen_ = chinese;
     writingCompartments_ = true;
     const HRESULT open = setCompartment(threadMgr_.Get(), clientId_, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, chinese ? TRUE : FALSE);
     const HRESULT mode = setCompartment(threadMgr_.Get(), clientId_, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION,
                                         chinese ? TF_CONVERSIONMODE_NATIVE : TF_CONVERSIONMODE_ALPHANUMERIC);
     writingCompartments_ = false;
-    debugLog(L"棒棒注音：輸入模式 %s（開關 0x%08X、轉換模式 0x%08X）", chinese ? L"中文" : L"英文", static_cast<unsigned>(open),
-             static_cast<unsigned>(mode));
+    debugLog(L"棒棒注音：輸入模式 %s%s（開關 0x%08X、轉換模式 0x%08X）", chinese ? L"中文" : L"英文",
+             openForComposition_ ? L"（英文模式，組字區送出前先維持開著）" : L"", static_cast<unsigned>(open), static_cast<unsigned>(mode));
 }
 
 // MARK: - 中英切換
@@ -625,13 +629,12 @@ void TextService::applyMode(bool chinese, bool byUser) {
     if (chinese == chinese_) return;
     if (!chinese) {
         // 使用者自己切到英文時，組字區留著：接著打的英文也放進組字區，按 Enter 或組字區滿了才送出
-        // （2026-11-23 使用者要求；Mac 版是先送出）。候選窗開著的話只關掉候選窗。
-        // 程式自己關掉輸入法（例如某些欄位），或舊式 IMM32 程式（暫時性的文件：英文模式下不會把按鍵交給輸入法），
-        // 照舊先送出組字區。
-        const ComPtr<ITfContext> context = compositionContext_ ? compositionContext_ : activeContext_;
-        TF_STATUS status{};
-        const bool transitory = context && SUCCEEDED(context->GetStatus(&status)) && (status.dwStaticFlags & TF_SS_TRANSITORY) != 0;
-        if (byUser && session_ && session_->isComposing() && !transitory) {
+        // （2026-11-23 使用者要求；Mac 版是先送出）。候選窗開著的話只關掉候選窗。程式自己關掉輸入法
+        // （例如某些欄位）時，照舊先送出組字區。
+        // 以前暫時性的文件（TF_SS_TRANSITORY）也先送出，以為只有舊式 IMM32 程式才是，但 Chrome、Edge、Claude 這類
+        // Chromium 程式也這樣回報，按 Shift 就被送出了（2026-11-26 使用者回報）。IMM32 程式在輸入法關掉後
+        // 不再把按鍵交給輸入法的問題，改由 publishInputMode 在組字區送出前維持回報「開著」解決。
+        if (byUser && session_ && session_->isComposing()) {
             if (session_->candidateList()) candidateAbort();
         } else {
             commitComposition();
@@ -664,15 +667,16 @@ STDMETHODIMP TextService::OnChange(REFGUID guid) {
             return S_OK;
         }
         if (writingCompartments_ || !threadMgr_) return S_OK;
-        const bool chinese = chinese_ && engine_ != nullptr;
         // 注意：在某個 compartment 的變更通知裡改同一個 compartment 會失敗（E_UNEXPECTED），所以重新設定一律延後。
         if (IsEqualGUID(guid, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)) {
             const CompartmentRead open = readCompartmentValue(compartment(GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, false).Get());
             if (open.type != VT_I4) {
                 schedulePublishInputMode();  // 被清掉了：重新設定
-            } else if ((open.value != 0) != chinese && engine_) {
+            } else if ((open.value != 0) != publishedOpen_ && engine_) {
                 // 程式自己打開或關掉輸入法（例如某些欄位）：只影響這個程式，不改全域的中英狀態。
+                // 和我們上一次寫的值比（英文模式下為了留住組字區，寫的可能是「開著」）。
                 debugLog(L"棒棒注音：程式把輸入法%s（只影響這個程式）", open.value != 0 ? L"打開" : L"關閉");
+                if (open.value == 0 && openForComposition_) commitComposition();  // 已經是英文模式：送出留著的組字區
                 applyMode(open.value != 0, false);
             }
         } else if (IsEqualGUID(guid, GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION)) {
@@ -819,6 +823,8 @@ HRESULT TextService::updateDocument(TfEditCookie ec, ITfContext* context) {
     } else if (composition_) {
         finishComposition(ec, context, std::wstring());  // 例如按 Esc 清掉了
     }
+    // 引擎不組字了、但文件裡沒有組字物件可結束（例如這個位置不能組字）：一樣改回報英文。
+    if (openForComposition_ && !(session_ && session_->isComposing())) schedulePublishInputMode();
     updateCandidateUI(ec, context);
     return S_OK;
 }
@@ -883,6 +889,9 @@ void TextService::finishComposition(TfEditCookie ec, ITfContext* context, const 
 void TextService::forgetComposition() {
     composition_.Reset();
     compositionContext_.Reset();
+    // 英文模式下為了留住組字區而維持回報「開著」：組字區結束了，改回報英文。
+    // 這裡常在 edit session 裡，不在這裡改 compartment，延後到訊息迴圈的下一輪。
+    if (openForComposition_) schedulePublishInputMode();
 }
 
 // MARK: - 候選窗
